@@ -244,7 +244,7 @@ with st.sidebar:
     st.session_state.current_spring = (spring_start, spring_end)
 
     st.subheader("点胶区间")
-    glue_text = st.text_area("格式: start,end,type (每行一个)", value=st.session_state.current_glue)
+    glue_text = st.text_area("格式: start,end,type (每行一个)", value=st.session_state.current_glue, key="edit_glue")
     st.session_state.current_glue = glue_text
 
     st.subheader("芯丝直径分段表")
@@ -273,7 +273,7 @@ with st.sidebar:
             st.error(f"读取文件出错: {e}")
 
     st.markdown("每行一个区间：`start,end,b_expr,Z_expr`，支持变量 `x`，支持 `+ - * / **` 和括号")
-    hypo_text = st.text_area("海波管函数", value=st.session_state.current_hypo_text, height=200)
+    hypo_text = st.text_area("海波管函数", value=st.session_state.current_hypo_text, height=200, key="edit_hypo_text")
     st.session_state.current_hypo_text = hypo_text
 
     st.subheader("传递系数")
@@ -345,7 +345,6 @@ with st.sidebar:
         st.session_state.current_hypo_text = default_hypo_v1
         st.session_state.current_spring = (0, 150)
         st.session_state.current_glue = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
-        st.session_state.edit_core_editor = default_core_v1.copy()
         st.rerun()
     if col2.button("版本二"):
         st.session_state.current_name = "Version 2 (Continuous)"
@@ -353,7 +352,6 @@ with st.sidebar:
         st.session_state.current_hypo_text = default_hypo_v2
         st.session_state.current_spring = (0, 150)
         st.session_state.current_glue = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
-        st.session_state.edit_core_editor = default_core_v1.copy()
         st.rerun()
     if col3.button("版本三"):
         st.session_state.current_name = "Version 3 (New)"
@@ -361,7 +359,6 @@ with st.sidebar:
         st.session_state.current_hypo_text = default_hypo_v3
         st.session_state.current_spring = (0, 120)
         st.session_state.current_glue = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
-        st.session_state.edit_core_editor = default_core_v3.copy()
         st.rerun()
 
 # ==================== 主区域 ====================
@@ -388,7 +385,6 @@ else:
             st.session_state.current_glue = "\n".join([f"{s},{e},{t}" for s,e,t in ver['glue_intervals']])
             hypo_lines = [f"{seg[0]},{seg[1]},{seg[2]},{seg[3]}" for seg in ver['hypo_segments']]
             st.session_state.current_hypo_text = "\n".join(hypo_lines)
-            # 传递系数
             st.session_state.full_b = ver['eta']['full_b']
             st.session_state.full_t = ver['eta']['full_t']
             st.session_state.full_a = ver['eta']['full_a']
@@ -404,8 +400,6 @@ else:
             st.session_state.ns_b = ver['eta']['no_spring_b']
             st.session_state.ns_t = ver['eta']['no_spring_t']
             st.session_state.ns_a = ver['eta']['no_spring_a']
-            # 更新带key组件
-            st.session_state.edit_core_editor = ver['core_df'].copy()
             st.rerun()
         if col3.button("删除", key=f"del_{idx}"):
             st.session_state.saved_versions.pop(idx)
