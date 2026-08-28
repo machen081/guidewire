@@ -266,6 +266,7 @@ with st.sidebar:
                     lines.append(f"{row['start']},{row['end']},{row['b_expr']},{row['Z_expr']}")
                 uploaded_text = "\n".join(lines)
                 st.session_state.current_hypo_text = uploaded_text
+                st.session_state.edit_hypo_text = uploaded_text  # 同步更新 text_area
                 st.success("文件已加载，已填充下方文本框")
             else:
                 st.error(f"文件缺少列，必需列: {', '.join(required)}")
@@ -345,6 +346,10 @@ with st.sidebar:
         st.session_state.current_hypo_text = default_hypo_v1
         st.session_state.current_spring = (0, 150)
         st.session_state.current_glue = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
+        # 同步更新带 key 的组件状态
+        st.session_state.edit_glue = st.session_state.current_glue
+        st.session_state.edit_hypo_text = st.session_state.current_hypo_text
+        st.session_state.edit_core_editor = default_core_v1.copy()
         st.rerun()
     if col2.button("版本二"):
         st.session_state.current_name = "Version 2 (Continuous)"
@@ -352,6 +357,9 @@ with st.sidebar:
         st.session_state.current_hypo_text = default_hypo_v2
         st.session_state.current_spring = (0, 150)
         st.session_state.current_glue = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
+        st.session_state.edit_glue = st.session_state.current_glue
+        st.session_state.edit_hypo_text = st.session_state.current_hypo_text
+        st.session_state.edit_core_editor = default_core_v1.copy()
         st.rerun()
     if col3.button("版本三"):
         st.session_state.current_name = "Version 3 (New)"
@@ -359,6 +367,9 @@ with st.sidebar:
         st.session_state.current_hypo_text = default_hypo_v3
         st.session_state.current_spring = (0, 120)
         st.session_state.current_glue = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
+        st.session_state.edit_glue = st.session_state.current_glue
+        st.session_state.edit_hypo_text = st.session_state.current_hypo_text
+        st.session_state.edit_core_editor = default_core_v3.copy()
         st.rerun()
 
 # ==================== 主区域 ====================
@@ -385,6 +396,7 @@ else:
             st.session_state.current_glue = "\n".join([f"{s},{e},{t}" for s,e,t in ver['glue_intervals']])
             hypo_lines = [f"{seg[0]},{seg[1]},{seg[2]},{seg[3]}" for seg in ver['hypo_segments']]
             st.session_state.current_hypo_text = "\n".join(hypo_lines)
+            # 传递系数
             st.session_state.full_b = ver['eta']['full_b']
             st.session_state.full_t = ver['eta']['full_t']
             st.session_state.full_a = ver['eta']['full_a']
@@ -400,6 +412,10 @@ else:
             st.session_state.ns_b = ver['eta']['no_spring_b']
             st.session_state.ns_t = ver['eta']['no_spring_t']
             st.session_state.ns_a = ver['eta']['no_spring_a']
+            # 更新带key组件
+            st.session_state.edit_glue = st.session_state.current_glue
+            st.session_state.edit_hypo_text = st.session_state.current_hypo_text
+            st.session_state.edit_core_editor = ver['core_df'].copy()
             st.rerun()
         if col3.button("删除", key=f"del_{idx}"):
             st.session_state.saved_versions.pop(idx)
