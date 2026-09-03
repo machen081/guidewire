@@ -252,26 +252,36 @@ else:
     col2.metric("Total Bending Stiffness EI", f"{EI_total:.2f} N·mm²")
     col3.metric("Total Crush Stiffness Kp", f"{Kp_total:.2f} N/mm")
 
-    # 使用上下布局，确保截面图可见
+    # 截面图（从外向内绘制，避免覆盖）
     st.subheader("Cross-section View")
     fig_cross, ax_cross = plt.subplots(figsize=(5, 5))
     colors = plt.cm.tab10(np.linspace(0, 1, len(layers)))
-    ax_cross.add_patch(plt.Circle((0, 0), layers[0]['r_in'], color='white', fill=True, linewidth=0.5))
-    for i, layer in enumerate(layers):
+
+    # 从外向内绘制各层
+    for i in reversed(range(len(layers))):
+        layer = layers[i]
         r_in = layer['r_in']
         r_out = layer['r_out']
-        ring = plt.Circle((0, 0), r_out, color=colors[i], alpha=0.6)
-        ax_cross.add_patch(ring)
-        inner = plt.Circle((0, 0), r_in, color='white', fill=True)
-        ax_cross.add_patch(inner)
-        r_mid = (r_in + r_out) / 2
+        # 外圆
+        ax_cross.add_patch(plt.Circle((0, 0), r_out, color=colors[i], alpha=0.6))
+        # 内圆（白色）形成环
+        ax_cross.add_patch(plt.Circle((0, 0), r_in, color='white', fill=True))
+
+    # 最内腔（如果内半径大于0）
+    if layers[0]['r_in'] > 0:
+        ax_cross.add_patch(plt.Circle((0, 0), layers[0]['r_in'], color='white', fill=True))
+
+    # 添加层号标注
+    for i, layer in enumerate(layers):
+        r_mid = (layer['r_in'] + layer['r_out']) / 2
         ax_cross.text(0, r_mid, f"L{i+1}", ha='center', va='center', fontsize=9,
                       color='black', bbox=dict(facecolor='white', alpha=0.5, edgecolor='none'))
-    ax_cross.set_xlim(-layers[-1]['r_out']*1.2, layers[-1]['r_out']*1.2)
-    ax_cross.set_ylim(-layers[-1]['r_out']*1.2, layers[-1]['r_out']*1.2)
+
+    ax_cross.set_xlim(-layers[-1]['r_out'] * 1.2, layers[-1]['r_out'] * 1.2)
+    ax_cross.set_ylim(-layers[-1]['r_out'] * 1.2, layers[-1]['r_out'] * 1.2)
     ax_cross.set_aspect('equal')
     ax_cross.axis('off')
-    st.pyplot(fig_cross, use_container_width=True)
+    st.pyplot(fig_cross)   # 不使用 use_container_width，兼容性更好
 
     # 堆叠条形图
     st.subheader("Layer Contributions to Stiffness")
@@ -297,7 +307,7 @@ else:
     axes_bar[2].grid(axis='y', linestyle='--', alpha=0.7)
 
     fig_bar.tight_layout(rect=[0, 0, 1, 0.95])
-    st.pyplot(fig_bar, use_container_width=True)
+    st.pyplot(fig_bar)
 
     # 层参数表
     st.subheader("Layer Parameters")
