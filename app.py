@@ -2,478 +2,357 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from copy import deepcopy
 
-st.set_page_config(page_title="导丝刚度分析工具", layout="wide")
+st.set_page_config(page_title="微导管多层刚度沿长度分布计算器", layout="wide")
 
-COLORS = ['green', 'blue', 'orange', 'purple', 'red', 'cyan', 'magenta', 'yellow', 'black', 'brown']
-
-# ==================== 安全表达式求值 ====================
-def safe_eval(expr, x_val):
-    import re
-    allowed = set("0123456789+-*/(). xXeE")
-    if any(ch not in allowed for ch in expr):
-        raise ValueError(f"表达式包含非法字符: {expr}")
-    expr_sub = expr.replace('x', f'({x_val})')
-    return float(eval(expr_sub))
-
-# ==================== 海波管分段函数解析 ====================
-def parse_hypo_functions(text):
-    segments = []
-    for line in text.strip().splitlines():
-        line = line.strip()
-        if not line or line.startswith('#'):
-            continue
-        parts = [p.strip() for p in line.split(',')]
-        if len(parts) != 4:
-            continue
-        try:
-            start = float(parts[0])
-            end = float(parts[1])
-            b_expr = parts[2]
-            Z_expr = parts[3]
-            segments.append((start, end, b_expr, Z_expr))
-        except:
-            continue
-    return segments
-
-def calc_b_Z(x, segments):
-    for start, end, b_expr, Z_expr in segments:
-        if start <= x < end:
-            b = safe_eval(b_expr, x)
-            Z = safe_eval(Z_expr, x)
-            return b, Z
-    if x < segments[0][0]:
-        b = safe_eval(segments[0][2], segments[0][0])
-        Z = safe_eval(segments[0][3], segments[0][0])
-    else:
-        b = safe_eval(segments[-1][2], segments[-1][1])
-        Z = safe_eval(segments[-1][3], segments[-1][1])
-    return b, Z
+# ==================== 材料库 ====================
+material_library = {
+    "自定义": None,
+    "PTFE": 500,
+    "FEP": 400,
+    "Pebax 3533": 10,
+    "Pebax 5533": 30,
+    "Pebax 7233": 50,
+    "尼龙 12": 1500,
+    "尼龙 6": 2500,
+    "聚酰亚胺": 2500,
+    "不锈钢 304": 200000,
+    "镍钛合金": 60000,
+    "钴铬合金": 220000,
+}
 
 # ==================== 计算函数 ====================
-def compute_version(x, core_df, hypo_segments, params, eta_global):
-    E_core = params['E_core']
-    G_core = params['G_core']
-    E_hypo = params['E_hypo']
-    G_hypo = params['G_hypo']
-    D_o = params['D_o']
-    D_i = params['D_i']
-    w_s = params['w_s']
-    L_total = params['L_total']
-    F = params['F']
-    T0 = params['T0']
-    spring_start = params['spring_start']
-    spring_end = params['spring_end']
-    glue_intervals = params['glue_intervals']
+def compute_stiffness_at_x(layers):
+    """根据给定位置的层参数计算 EA, EI, Kp"""
+    EA = 0.0
+    EI = 0.0
+    for layer in layers:
+        r_in = layer['r_in']
+        r_out = layer['r_out']
+        E_z = layer['E_z']
+        if r_out <= r_in:
+            raise ValueError(f"层内外半径错误：内半径 {r_in} 不小于外半径 {r_out}")
+        EA += np.pi * E_z * (r_out**2 - r_in**2)
+        EI += (np.pi / 4) * E_z * (r_out**4 - r_in**4)
+    if not layers:
+        raise ValueError("至少需要一层")
+    r0 = layers[0]['r_in']
+    rn = layers[-1]['r_out']
+    R = (r0 + rn) / 2
+    Kp = EI / (R**3 * (np.pi/2 - 4/np.pi))
+    return EA, EI, Kp
 
-    # 完整海波管基准刚度
-    I0 = np.pi / 64 * (D_o**4 - D_i**4)
-    J0 = 2 * I0
-    A0 = np.pi / 4 * (D_o**2 - D_i**2)
-    EI0 = E_hypo * I0
-    GJ0 = G_hypo * J0
-    EA0 = E_hypo * A0
+# ==================== 默认分段数据 ====================
+def create_default_segment_layers():
+    """默认三层：PTFE、编织层、Pebax"""
+    return [
+        {"layer_type": "普通材料", "r_in": 0.40, "r_out": 0.45,
+         "material": "PTFE", "E_z": 500},
+        {"layer_type": "编织层", "r_in": 0.45, "r_out": 0.50,
+         "d_w": 0.02, "alpha": 45.0, "PPI": 80,
+         "E_f": 200000, "E_m": 30,
+         "E_z": None},  # 占位，计算时更新
+        {"layer_type": "普通材料", "r_in": 0.50, "r_out": 0.60,
+         "material": "Pebax 7233", "E_z": 50},
+    ]
 
-    n = len(x)
-    d_core_arr = np.zeros(n)
-    b_arr = np.zeros(n)
-    Z_arr = np.zeros(n)
-    eta_b_arr = np.zeros(n)
-    eta_t_arr = np.zeros(n)
-    eta_a_arr = np.zeros(n)
+def update_braid_Ez(layer):
+    """根据编织参数计算等效轴向模量"""
+    d_w = layer['d_w']
+    alpha = layer['alpha']
+    PPI = layer['PPI']
+    E_f = layer['E_f']
+    E_m = layer['E_m']
+    r_in = layer['r_in']
+    r_out = layer['r_out']
+    alpha_rad = np.radians(alpha)
+    denom = 25.4 * 2 * (r_out**2 - r_in**2) * np.cos(alpha_rad)
+    if denom > 0 and r_out > r_in:
+        V_f = min(1.0, (np.pi * d_w**2 * PPI) / denom)
+    else:
+        V_f = 0.0
+    Ez = E_f * V_f * (np.cos(alpha_rad)**4) + E_m * (1 - V_f)
+    return Ez
 
-    # 芯丝直径插值
-    def interp_core(x_val):
-        for _, row in core_df.iterrows():
-            if row['start'] <= x_val < row['end']:
-                t = (x_val - row['start']) / (row['end'] - row['start'])
-                return row['d_start'] + t * (row['d_end'] - row['d_start'])
-        if x_val < core_df.iloc[0]['start']:
-            return core_df.iloc[0]['d_start']
-        else:
-            return core_df.iloc[-1]['d_end']
+# ==================== session_state 初始化 ====================
+if 'segments' not in st.session_state:
+    st.session_state.segments = deepcopy(default_segments)
+if 'L_total' not in st.session_state:
+    st.session_state.L_total = 350.0
 
-    for i, xi in enumerate(x):
-        d_core_arr[i] = interp_core(xi)
-        b_val, Z_val = calc_b_Z(xi, hypo_segments)
-        b_arr[i] = b_val
-        Z_arr[i] = Z_val
-
-        # 传递系数
-        eta_b = eta_global['no_spring_b']
-        eta_t = eta_global['no_spring_t']
-        eta_a = eta_global['no_spring_a']
-
-        if spring_start <= xi < spring_end:
-            eta_b = eta_global['spring_b']
-            eta_t = eta_global['spring_t']
-            eta_a = eta_global['spring_a']
-
-        for g_start, g_end, g_type in glue_intervals:
-            if g_start <= xi < g_end:
-                if g_type == 'full':
-                    eta_b = eta_global['full_b']
-                    eta_t = eta_global['full_t']
-                    eta_a = eta_global['full_a']
-                elif g_type == 'core_spring':
-                    eta_b = eta_global['core_spring_b']
-                    eta_t = eta_global['core_spring_t']
-                    eta_a = eta_global['core_spring_a']
-                elif g_type == 'core_hypo':
-                    eta_b = eta_global['core_hypo_b']
-                    eta_t = eta_global['core_hypo_t']
-                    eta_a = eta_global['core_hypo_a']
-                break
-
-        eta_b_arr[i] = eta_b
-        eta_t_arr[i] = eta_t
-        eta_a_arr[i] = eta_a
-
-    # 芯丝刚度
-    EI_core = E_core * np.pi * d_core_arr**4 / 64
-    GJ_core = G_core * np.pi * d_core_arr**4 / 32
-    EA_core = E_core * np.pi * d_core_arr**2 / 4
-
-    # 海波管折减系数
-    Y = 0.5184 - b_arr
-    denom = Z_arr - w_s
-    denom_safe = np.where(denom > 0, denom, 1e-9)
-    k = 1.0 / (1.0 + (w_s / denom_safe) * (Y / b_arr))
-    k = np.where(denom > 0, k, 1.0)
-
-    EI_hypo = k * EI0
-    GJ_hypo = k * GJ0
-    EA_hypo = k * EA0
-
-    EI_total = EI_core + eta_b_arr * EI_hypo
-    GJ_total = GJ_core + eta_t_arr * GJ_hypo
-    EA_total = EA_core + eta_a_arr * EA_hypo
-
-    # 应力计算
-    M_total = F * x
-    T_total = T0 * x / L_total
-    ratio_b = (eta_b_arr * EI_hypo) / (EI_core + eta_b_arr * EI_hypo)
-    ratio_t = (eta_t_arr * GJ_hypo) / (GJ_core + eta_t_arr * GJ_hypo)
-    M_hypo = ratio_b * M_total
-    T_hypo = ratio_t * T_total
-
-    t_wall = (D_o - D_i) / 2
-    r_m = (D_o + D_i) / 4
-    sigma_bend = M_hypo / (2 * b_arr * t_wall * r_m)
-    tau_tors = T_hypo / (2 * b_arr * t_wall * r_m)
-    sigma_eq = np.sqrt(sigma_bend**2 + 3 * tau_tors**2)
-
-    return EI_total, GJ_total, EA_total, sigma_bend, tau_tors, sigma_eq
-
-# ==================== 默认数据 ====================
-default_core_v1 = pd.DataFrame([
-    {"start": 0, "end": 15, "d_start": 0.0508, "d_end": 0.0508},
-    {"start": 15, "end": 25, "d_start": 0.0508, "d_end": 0.0762},
-    {"start": 25, "end": 100, "d_start": 0.0762, "d_end": 0.0762},
-    {"start": 100, "end": 160, "d_start": 0.0762, "d_end": 0.127},
-    {"start": 160, "end": 350, "d_start": 0.127, "d_end": 0.127},
-])
-default_core_v3 = pd.DataFrame([
-    {"start": 0, "end": 15, "d_start": 0.0508, "d_end": 0.0508},
-    {"start": 15, "end": 25, "d_start": 0.0508, "d_end": 0.0889},
-    {"start": 25, "end": 70, "d_start": 0.0889, "d_end": 0.0889},
-    {"start": 70, "end": 126, "d_start": 0.0889, "d_end": 0.14224},
-    {"start": 126, "end": 175, "d_start": 0.14224, "d_end": 0.14224},
-    {"start": 175, "end": 350, "d_start": 0.14224, "d_end": 0.22098},
-])
-
-default_hypo_v1 = """0,10,0.036,0.058
-10,20,0.049,0.0663
-20,30,0.058,0.0747
-30,40,0.071,0.083
-40,50,0.086,0.0913
-50,60,0.096,0.0997
-60,70,0.102,0.108
-70,80,0.112,0.1163
-80,90,0.126,0.1246
-90,350,0.152,0.133"""
-
-default_hypo_v2 = """0,10,0.036,0.058
-10,90,-0.000000154786*x**3+0.000017054434*x**2+0.0011531092*x+0.0229182506,-0.000008789096*x**2+0.0018164096*x+0.0407148136
-90,350,0.152,0.133"""
-
-default_hypo_v3 = """0,10,0.036,0.058
-10,70,-0.000000154786*x**3+0.00001307278*x**2+0.0011531092*x+0.023316416,-37/3600000*x**2+0.0014388889*x+0.0446388888
-70,145,0.115,0.095
-145,180,-0.000030204*(x-145)**2+(0.037-1225*(-0.000030204))/35*(x-145)+0.115,0.095+0.038*(x-145)/35
-180,350,0.152,0.133"""
-
-# ==================== 初始化 session_state ====================
-if 'saved_versions' not in st.session_state:
-    st.session_state.saved_versions = []
-if 'current_core' not in st.session_state:
-    st.session_state.current_core = default_core_v1.copy()
-if 'current_hypo_text' not in st.session_state:
-    st.session_state.current_hypo_text = default_hypo_v1
-if 'current_name' not in st.session_state:
-    st.session_state.current_name = "Version 1 (Step)"
-if 'current_spring' not in st.session_state:
-    st.session_state.current_spring = (0, 150)
-if 'current_glue' not in st.session_state:
-    st.session_state.current_glue = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
+# 默认分段
+default_segments = [
+    {"start": 0, "end": 100, "layers": create_default_segment_layers()},
+    {"start": 100, "end": 350, "layers": create_default_segment_layers()},
+]
 
 # ==================== 侧边栏 ====================
 with st.sidebar:
-    st.header("当前版本编辑")
-    st.session_state.current_name = st.text_input("版本名称", value=st.session_state.current_name)
+    st.header("导管总长度")
+    L_total = st.number_input("总长度 (mm)", min_value=1.0, value=st.session_state.L_total,
+                              step=10.0, key="L_total_input")
+    st.session_state.L_total = L_total
 
-    st.subheader("材料参数")
-    E_core = st.number_input("芯丝杨氏模量 (MPa)", value=200000, step=1000, key="edit_E_core")
-    G_core = st.number_input("芯丝剪切模量 (MPa)", value=77000, step=1000, key="edit_G_core")
-    E_hypo = st.number_input("海波管杨氏模量 (MPa)", value=50000, step=1000, key="edit_E_hypo")
-    G_hypo = st.number_input("海波管剪切模量 (MPa)", value=19231, step=1000, key="edit_G_hypo")
-
-    st.subheader("几何参数")
-    D_o = st.number_input("海波管外径 (mm)", value=0.33, step=0.01, key="edit_D_o")
-    D_i = st.number_input("海波管内径 (mm)", value=0.23, step=0.01, key="edit_D_i")
-    w_s = st.number_input("槽宽 (mm)", value=0.03, step=0.01, key="edit_w_s")
-    L_total = st.number_input("导丝总长 (mm)", value=350, step=10, key="edit_L_total")
-
-    st.subheader("载荷参数")
-    F = st.number_input("远端横向力 F (N)", value=0.001, step=0.001, format="%.4f", key="edit_F")
-    T0 = st.number_input("近端扭矩 T0 (N·mm)", value=1.0, step=0.1, key="edit_T0")
-
-    st.subheader("弹簧圈范围")
-    spring_start = st.number_input("弹簧圈起始位置 (mm)", value=st.session_state.current_spring[0], step=5, key="edit_spring_start")
-    spring_end = st.number_input("弹簧圈结束位置 (mm)", value=st.session_state.current_spring[1], step=5, key="edit_spring_end")
-    st.session_state.current_spring = (spring_start, spring_end)
-
-    st.subheader("点胶区间")
-    glue_text = st.text_area("格式: start,end,type (每行一个)", value=st.session_state.current_glue, key="edit_glue")
-    st.session_state.current_glue = glue_text
-
-    st.subheader("芯丝直径分段表")
-    edited_core = st.data_editor(st.session_state.current_core, num_rows="dynamic", key="edit_core_editor")
-    st.session_state.current_core = edited_core
-
-    st.subheader("海波管开槽函数 (b(x), Z(x))")
-    uploaded_file = st.file_uploader("上传海波管参数 Excel/CSV 文件 (可选)", type=["xlsx", "xls", "csv"], key="hypo_upload")
-    if uploaded_file is not None:
-        try:
-            if uploaded_file.name.endswith(".csv"):
-                df_upload = pd.read_csv(uploaded_file)
-            else:
-                df_upload = pd.read_excel(uploaded_file)
-            required = ['start', 'end', 'b_expr', 'Z_expr']
-            if all(col in df_upload.columns for col in required):
-                lines = []
-                for _, row in df_upload.iterrows():
-                    lines.append(f"{row['start']},{row['end']},{row['b_expr']},{row['Z_expr']}")
-                uploaded_text = "\n".join(lines)
-                st.session_state.current_hypo_text = uploaded_text
-                st.success("文件已加载，已填充下方文本框")
-            else:
-                st.error(f"文件缺少列，必需列: {', '.join(required)}")
-        except Exception as e:
-            st.error(f"读取文件出错: {e}")
-
-    st.markdown("每行一个区间：`start,end,b_expr,Z_expr`，支持变量 `x`，支持 `+ - * / **` 和括号")
-    hypo_text = st.text_area("海波管函数", value=st.session_state.current_hypo_text, height=200, key="edit_hypo_text")
-    st.session_state.current_hypo_text = hypo_text
-
-    st.subheader("传递系数")
-    with st.expander("完全点胶区 (full)"):
-        full_b = st.number_input("弯曲", value=1.0, step=0.05, key="full_b")
-        full_t = st.number_input("扭转", value=1.0, step=0.05, key="full_t")
-        full_a = st.number_input("轴向", value=1.0, step=0.05, key="full_a")
-    with st.expander("芯丝+弹簧圈点胶区 (core_spring)"):
-        cs_b = st.number_input("弯曲", value=0.9, step=0.05, key="cs_b")
-        cs_t = st.number_input("扭转", value=0.9, step=0.05, key="cs_t")
-        cs_a = st.number_input("轴向", value=0.0, step=0.05, key="cs_a")
-    with st.expander("芯丝+海波管点胶区 (core_hypo)"):
-        ch_b = st.number_input("弯曲", value=1.0, step=0.05, key="ch_b")
-        ch_t = st.number_input("扭转", value=1.0, step=0.05, key="ch_t")
-        ch_a = st.number_input("轴向", value=1.0, step=0.05, key="ch_a")
-    with st.expander("有弹簧圈无点胶区"):
-        sp_b = st.number_input("弯曲", value=0.9, step=0.05, key="sp_b")
-        sp_t = st.number_input("扭转", value=0.6, step=0.05, key="sp_t")
-        sp_a = st.number_input("轴向", value=0.0, step=0.05, key="sp_a")
-    with st.expander("无弹簧圈无点胶区"):
-        ns_b = st.number_input("弯曲", value=0.85, step=0.05, key="ns_b")
-        ns_t = st.number_input("扭转", value=0.35, step=0.05, key="ns_t")
-        ns_a = st.number_input("轴向", value=0.0, step=0.05, key="ns_a")
-
-    if st.button("保存当前版本", type="primary"):
-        glue_intervals = []
-        if glue_text.strip():
-            for line in glue_text.strip().splitlines():
-                parts = [p.strip() for p in line.split(',')]
-                if len(parts) == 3:
-                    try:
-                        glue_intervals.append((float(parts[0]), float(parts[1]), parts[2]))
-                    except:
-                        pass
-        hypo_segments = parse_hypo_functions(hypo_text)
-        version = {
-            'name': st.session_state.current_name,
-            'E_core': E_core,
-            'G_core': G_core,
-            'E_hypo': E_hypo,
-            'G_hypo': G_hypo,
-            'D_o': D_o,
-            'D_i': D_i,
-            'w_s': w_s,
-            'L_total': L_total,
-            'F': F,
-            'T0': T0,
-            'spring_start': spring_start,
-            'spring_end': spring_end,
-            'glue_intervals': glue_intervals,
-            'core_df': st.session_state.current_core.copy(),
-            'hypo_segments': hypo_segments,
-            'eta': {
-                'full_b': full_b, 'full_t': full_t, 'full_a': full_a,
-                'core_spring_b': cs_b, 'core_spring_t': cs_t, 'core_spring_a': cs_a,
-                'core_hypo_b': ch_b, 'core_hypo_t': ch_t, 'core_hypo_a': ch_a,
-                'spring_b': sp_b, 'spring_t': sp_t, 'spring_a': sp_a,
-                'no_spring_b': ns_b, 'no_spring_t': ns_t, 'no_spring_a': ns_a,
-            }
-        }
-        st.session_state.saved_versions.append(version)
-        st.success(f"版本 '{version['name']}' 已保存")
-
-    st.subheader("加载预设版本")
-    col1, col2, col3 = st.columns(3)
-    if col1.button("版本一"):
-        st.session_state.current_name = "Version 1 (Step)"
-        st.session_state.current_core = default_core_v1.copy()
-        st.session_state.current_hypo_text = default_hypo_v1
-        st.session_state.current_spring = (0, 150)
-        st.session_state.current_glue = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
+    st.header("分段管理")
+    n_segments = st.number_input("分段数", min_value=1, max_value=20,
+                                 value=len(st.session_state.segments), step=1,
+                                 key="n_segments_input")
+    if n_segments != len(st.session_state.segments):
+        if n_segments > len(st.session_state.segments):
+            for _ in range(n_segments - len(st.session_state.segments)):
+                last_seg = st.session_state.segments[-1]
+                new_start = last_seg['end']
+                new_end = min(new_start + 10.0, L_total)
+                st.session_state.segments.append({
+                    "start": new_start,
+                    "end": new_end,
+                    "layers": deepcopy(last_seg['layers'])
+                })
+        else:
+            st.session_state.segments = st.session_state.segments[:n_segments]
         st.rerun()
-    if col2.button("版本二"):
-        st.session_state.current_name = "Version 2 (Continuous)"
-        st.session_state.current_core = default_core_v1.copy()
-        st.session_state.current_hypo_text = default_hypo_v2
-        st.session_state.current_spring = (0, 150)
-        st.session_state.current_glue = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
-        st.rerun()
-    if col3.button("版本三"):
-        st.session_state.current_name = "Version 3 (New)"
-        st.session_state.current_core = default_core_v3.copy()
-        st.session_state.current_hypo_text = default_hypo_v3
-        st.session_state.current_spring = (0, 120)
-        st.session_state.current_glue = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
+
+    # 编辑每个分段
+    segments_to_save = []
+    valid = True
+    for i, seg in enumerate(st.session_state.segments):
+        with st.expander(f"分段 {i+1}", expanded=(i == 0)):
+            col1, col2 = st.columns(2)
+            with col1:
+                start = st.number_input(f"起点 (mm)", value=float(seg['start']),
+                                        step=1.0, key=f"seg_{i}_start")
+            with col2:
+                end = st.number_input(f"终点 (mm)", value=float(seg['end']),
+                                      step=1.0, key=f"seg_{i}_end")
+            if end <= start:
+                st.error("终点必须大于起点")
+                valid = False
+
+            st.markdown("**该段的层结构**")
+
+            # 动态编辑每一层
+            layers_list = []
+            n_layers = st.number_input(f"该段层数", min_value=1, max_value=10,
+                                       value=len(seg['layers']), step=1,
+                                       key=f"seg_{i}_n_layers")
+            # 调整层数
+            current_layers = seg['layers']
+            if n_layers != len(current_layers):
+                if n_layers > len(current_layers):
+                    for _ in range(n_layers - len(current_layers)):
+                        current_layers.append({
+                            "layer_type": "普通材料",
+                            "r_in": current_layers[-1]['r_out'] if current_layers else 0.0,
+                            "r_out": current_layers[-1]['r_out'] + 0.05 if current_layers else 0.1,
+                            "material": "自定义",
+                            "E_z": 0.0
+                        })
+                else:
+                    current_layers = current_layers[:n_layers]
+                seg['layers'] = current_layers
+
+            # 逐层输入
+            for j, layer in enumerate(seg['layers']):
+                st.markdown(f"**第 {j+1} 层**")
+                # 层类型选择
+                layer_type = st.radio(
+                    f"层类型",
+                    ["普通材料", "编织层"],
+                    horizontal=True,
+                    key=f"seg_{i}_layer_{j}_type",
+                    index=0 if layer.get('layer_type', '普通材料') == '普通材料' else 1
+                )
+                layer['layer_type'] = layer_type
+
+                col_r1, col_r2 = st.columns(2)
+                with col_r1:
+                    r_in = st.number_input(
+                        f"内半径 (mm)",
+                        value=float(layer['r_in']),
+                        step=0.01, format="%.3f",
+                        key=f"seg_{i}_layer_{j}_r_in"
+                    )
+                with col_r2:
+                    r_out = st.number_input(
+                        f"外半径 (mm)",
+                        value=float(layer['r_out']),
+                        step=0.01, format="%.3f",
+                        key=f"seg_{i}_layer_{j}_r_out"
+                    )
+                if r_out <= r_in:
+                    st.error(f"第 {j+1} 层外半径必须大于内半径")
+                    valid = False
+                layer['r_in'] = r_in
+                layer['r_out'] = r_out
+
+                if layer_type == "普通材料":
+                    # 材料选择
+                    material = st.selectbox(
+                        "材料",
+                        list(material_library.keys()),
+                        key=f"seg_{i}_layer_{j}_material",
+                        index=list(material_library.keys()).index(layer.get('material', '自定义'))
+                    )
+                    layer['material'] = material
+                    default_E = material_library[material] if material != "自定义" else 0.0
+                    E_z = st.number_input(
+                        "轴向模量 (MPa)",
+                        value=float(layer.get('E_z', default_E)),
+                        step=100.0, format="%.1f",
+                        key=f"seg_{i}_layer_{j}_Ez"
+                    )
+                    layer['E_z'] = E_z
+
+                else:  # 编织层
+                    col_d1, col_d2 = st.columns(2)
+                    with col_d1:
+                        d_w = st.number_input(
+                            "编织丝直径 (mm)",
+                            value=float(layer.get('d_w', 0.02)),
+                            step=0.005, format="%.3f",
+                            key=f"seg_{i}_layer_{j}_dw"
+                        )
+                        alpha = st.number_input(
+                            "编织角 (度)",
+                            value=float(layer.get('alpha', 45.0)),
+                            step=1.0,
+                            key=f"seg_{i}_layer_{j}_alpha"
+                        )
+                    with col_d2:
+                        PPI = st.number_input(
+                            "PPI (1/in)",
+                            value=int(layer.get('PPI', 80)),
+                            step=5,
+                            key=f"seg_{i}_layer_{j}_PPI"
+                        )
+                        E_f = st.number_input(
+                            "丝材模量 (MPa)",
+                            value=float(layer.get('E_f', 200000)),
+                            step=1000.0,
+                            key=f"seg_{i}_layer_{j}_Ef"
+                        )
+                    E_m = st.number_input(
+                        "基体模量 (MPa)",
+                        value=float(layer.get('E_m', 30)),
+                        step=1.0,
+                        key=f"seg_{i}_layer_{j}_Em"
+                    )
+                    layer['d_w'] = d_w
+                    layer['alpha'] = alpha
+                    layer['PPI'] = PPI
+                    layer['E_f'] = E_f
+                    layer['E_m'] = E_m
+                    # 计算等效轴向模量
+                    Ez_calc = update_braid_Ez(layer)
+                    layer['E_z'] = Ez_calc
+                    st.success(f"编织层等效轴向模量 E_z = {Ez_calc:.1f} MPa")
+
+                layers_list.append(layer)
+
+            # 更新分段层数据
+            seg['layers'] = layers_list
+
+            # 检查相邻层半径连续性
+            for j in range(1, len(layers_list)):
+                if abs(layers_list[j]['r_in'] - layers_list[j-1]['r_out']) > 1e-6:
+                    st.warning(f"第 {j+1} 层内半径 ({layers_list[j]['r_in']}) 与上一层外半径 ({layers_list[j-1]['r_out']}) 不一致，可能导致物理不连续")
+                    # 不标记为无效，仅警告
+
+            segments_to_save.append({
+                "start": start,
+                "end": end,
+                "layers": layers_list
+            })
+
+    # 检查分段覆盖是否连续
+    if valid and len(segments_to_save) > 0:
+        sorted_segments = sorted(segments_to_save, key=lambda x: x['start'])
+        if sorted_segments[0]['start'] > 0:
+            st.warning(f"第一个分段起点应不小于0，当前为{sorted_segments[0]['start']}")
+            valid = False
+        for i in range(len(sorted_segments)-1):
+            if abs(sorted_segments[i]['end'] - sorted_segments[i+1]['start']) > 1e-6:
+                st.warning(f"分段 {i+1} 终点 ({sorted_segments[i]['end']}) 与分段 {i+2} 起点 ({sorted_segments[i+1]['start']}) 不连续")
+                valid = False
+        if sorted_segments[-1]['end'] < L_total:
+            st.warning(f"最后一个分段终点应不小于总长度 {L_total}，当前为{sorted_segments[-1]['end']}")
+            valid = False
+
+    if st.button("保存修改", type="primary"):
+        if valid:
+            st.session_state.segments = segments_to_save
+            st.success("参数已保存")
+            st.rerun()
+        else:
+            st.error("请修正错误后再保存")
+
+    if st.button("恢复示例数据"):
+        st.session_state.segments = deepcopy(default_segments)
+        st.session_state.L_total = 350.0
         st.rerun()
 
 # ==================== 主区域 ====================
-st.header("已保存版本")
-if not st.session_state.saved_versions:
-    st.info("请在左侧编辑参数并点击“保存当前版本”。")
+st.header("刚度沿长度分布")
+
+if not st.session_state.segments:
+    st.info("请在左侧添加分段数据")
 else:
-    for idx, ver in enumerate(st.session_state.saved_versions):
-        col1, col2, col3 = st.columns([3,1,1])
-        # 可编辑名称
-        new_name = col1.text_input(
-            "版本名称",
-            value=ver['name'],
-            key=f"rename_{idx}",
-            label_visibility="collapsed"
-        )
-        if new_name != ver['name']:
-            ver['name'] = new_name
+    plot_segments = st.session_state.segments
 
-        if col2.button("加载到左侧", key=f"load_{idx}"):
-            st.session_state.current_name = ver['name']
-            st.session_state.current_core = ver['core_df'].copy()
-            st.session_state.current_spring = (ver['spring_start'], ver['spring_end'])
-            st.session_state.current_glue = "\n".join([f"{s},{e},{t}" for s,e,t in ver['glue_intervals']])
-            hypo_lines = [f"{seg[0]},{seg[1]},{seg[2]},{seg[3]}" for seg in ver['hypo_segments']]
-            st.session_state.current_hypo_text = "\n".join(hypo_lines)
-            st.session_state.full_b = ver['eta']['full_b']
-            st.session_state.full_t = ver['eta']['full_t']
-            st.session_state.full_a = ver['eta']['full_a']
-            st.session_state.cs_b = ver['eta']['core_spring_b']
-            st.session_state.cs_t = ver['eta']['core_spring_t']
-            st.session_state.cs_a = ver['eta']['core_spring_a']
-            st.session_state.ch_b = ver['eta']['core_hypo_b']
-            st.session_state.ch_t = ver['eta']['core_hypo_t']
-            st.session_state.ch_a = ver['eta']['core_hypo_a']
-            st.session_state.sp_b = ver['eta']['spring_b']
-            st.session_state.sp_t = ver['eta']['spring_t']
-            st.session_state.sp_a = ver['eta']['spring_a']
-            st.session_state.ns_b = ver['eta']['no_spring_b']
-            st.session_state.ns_t = ver['eta']['no_spring_t']
-            st.session_state.ns_a = ver['eta']['no_spring_a']
-            st.rerun()
-        if col3.button("删除", key=f"del_{idx}"):
-            st.session_state.saved_versions.pop(idx)
-            st.rerun()
+    x = np.linspace(0, st.session_state.L_total, 500)
 
-    st.subheader("选择要对比的版本")
-    selected_indices = []
-    for idx, ver in enumerate(st.session_state.saved_versions):
-        if st.checkbox(ver['name'], key=f"check_{idx}"):
-            selected_indices.append(idx)
+    EA_arr = np.zeros_like(x)
+    EI_arr = np.zeros_like(x)
+    Kp_arr = np.zeros_like(x)
 
-    if st.button("生成对比曲线", type="primary"):
-        if not selected_indices:
-            st.warning("请至少选择一个版本")
-        else:
-            x = np.linspace(0, L_total, 500)
+    for i, xi in enumerate(x):
+        seg = None
+        for s in plot_segments:
+            if s['start'] <= xi < s['end']:
+                seg = s
+                break
+        if seg is None:
+            if xi < plot_segments[0]['start']:
+                seg = plot_segments[0]
+            else:
+                seg = plot_segments[-1]
+        try:
+            EA, EI, Kp = compute_stiffness_at_x(seg['layers'])
+            EA_arr[i] = EA
+            EI_arr[i] = EI
+            Kp_arr[i] = Kp
+        except Exception as e:
+            st.error(f"在 x={xi:.2f} 处计算失败：{e}")
+            st.stop()
 
-            fig1, axes1 = plt.subplots(3, 1, figsize=(10, 12))
-            fig1.suptitle("Stiffness Comparison")
-            axes1[0].set_ylabel('Bending stiffness EI (N·mm²)')
-            axes1[1].set_ylabel('Torsional stiffness GJ (N·mm²)')
-            axes1[2].set_xlabel('Distance from distal end (mm)')
-            axes1[2].set_ylabel('Axial stiffness EA (N)')
-            for ax in axes1:
-                ax.grid(True)
+    # 绘图（调整布局避免文字重叠）
+    fig, axes = plt.subplots(3, 1, figsize=(12, 14))
+    fig.suptitle("微导管刚度沿长度分布", y=0.98, fontsize=14)
 
-            fig2, axes2 = plt.subplots(3, 1, figsize=(10, 12))
-            fig2.suptitle("Hypo-tube Connector Stress Comparison")
-            axes2[0].set_ylabel('Bending normal stress (MPa)')
-            axes2[1].set_ylabel('Torsional shear stress (MPa)')
-            axes2[2].set_xlabel('Distance from distal end (mm)')
-            axes2[2].set_ylabel('Von Mises stress (MPa)')
-            for ax in axes2:
-                ax.grid(True)
+    axes[0].plot(x, EA_arr, 'b-', linewidth=2)
+    axes[0].set_ylabel('轴向刚度 EA (N)', fontsize=10)
+    axes[0].grid(True)
+    axes[0].set_title('Axial Stiffness', fontsize=12, pad=10)
 
-            for idx in selected_indices:
-                ver = st.session_state.saved_versions[idx]
-                color = COLORS[idx % len(COLORS)]
-                label = ver['name']
+    axes[1].plot(x, EI_arr, 'g-', linewidth=2)
+    axes[1].set_ylabel('弯曲刚度 EI (N·mm²)', fontsize=10)
+    axes[1].grid(True)
+    axes[1].set_title('Bending Stiffness', fontsize=12, pad=10)
 
-                params = {
-                    'E_core': ver['E_core'],
-                    'G_core': ver['G_core'],
-                    'E_hypo': ver['E_hypo'],
-                    'G_hypo': ver['G_hypo'],
-                    'D_o': ver['D_o'],
-                    'D_i': ver['D_i'],
-                    'w_s': ver['w_s'],
-                    'L_total': ver['L_total'],
-                    'F': ver['F'],
-                    'T0': ver['T0'],
-                    'spring_start': ver['spring_start'],
-                    'spring_end': ver['spring_end'],
-                    'glue_intervals': ver['glue_intervals'],
-                }
+    axes[2].plot(x, Kp_arr, 'r-', linewidth=2)
+    axes[2].set_xlabel('距远端位置 (mm)', fontsize=10)
+    axes[2].set_ylabel('抗压扁刚度 Kp (N/mm)', fontsize=10)
+    axes[2].grid(True)
+    axes[2].set_title('Crush Stiffness (diametral compression)', fontsize=12, pad=10)
 
-                EI_total, GJ_total, EA_total, sigma_bend, tau_tors, sigma_eq = compute_version(
-                    x, ver['core_df'], ver['hypo_segments'], params, ver['eta']
-                )
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    st.pyplot(fig)
 
-                axes1[0].plot(x, EI_total, color=color, linewidth=2, label=label)
-                axes1[1].plot(x, GJ_total, color=color, linewidth=2, label=label)
-                axes1[2].plot(x, EA_total, color=color, linewidth=2, label=label)
-
-                axes2[0].plot(x, sigma_bend, color=color, linewidth=2, label=label)
-                axes2[1].plot(x, tau_tors, color=color, linewidth=2, label=label)
-                axes2[2].plot(x, sigma_eq, color=color, linewidth=2, label=label)
-
-            axes1[0].legend()
-            axes1[1].legend()
-            axes1[2].legend()
-            axes2[0].legend()
-            axes2[1].legend()
-            axes2[2].legend()
-
-            st.pyplot(fig1)
-            st.pyplot(fig2)
+    # 显示分段数据表
+    st.subheader("当前分段数据")
+    for i, seg in enumerate(plot_segments):
+        st.markdown(f"**分段 {i+1}：{seg['start']:.1f} – {seg['end']:.1f} mm**")
+        # 将层列表转换为DataFrame显示
+        df = pd.DataFrame(seg['layers'])
+        st.dataframe(df, use_container_width=True)
