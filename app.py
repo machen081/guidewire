@@ -217,54 +217,42 @@ if 'current_spring' not in st.session_state:
 if 'current_glue' not in st.session_state:
     st.session_state.current_glue = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
 
-# 传递系数初始值（用于 number_input 的 value）
-eta_defaults = {
-    'full_b': 1.0, 'full_t': 1.0, 'full_a': 1.0,
-    'core_spring_b': 0.9, 'core_spring_t': 0.9, 'core_spring_a': 0.0,
-    'core_hypo_b': 1.0, 'core_hypo_t': 1.0, 'core_hypo_a': 1.0,
-    'spring_b': 0.9, 'spring_t': 0.6, 'spring_a': 0.0,
-    'no_spring_b': 0.85, 'no_spring_t': 0.35, 'no_spring_a': 0.0,
-}
-for k, v in eta_defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
-
 # ==================== 侧边栏 ====================
 with st.sidebar:
     st.header("当前版本编辑")
     st.session_state.current_name = st.text_input("版本名称", value=st.session_state.current_name)
 
     st.subheader("材料参数")
-    E_core = st.number_input("芯丝杨氏模量 (MPa)", value=200000, step=1000)
-    G_core = st.number_input("芯丝剪切模量 (MPa)", value=77000, step=1000)
-    E_hypo = st.number_input("海波管杨氏模量 (MPa)", value=50000, step=1000)
-    G_hypo = st.number_input("海波管剪切模量 (MPa)", value=19231, step=1000)
+    E_core = st.number_input("芯丝杨氏模量 (MPa)", value=200000, step=1000, key="edit_E_core")
+    G_core = st.number_input("芯丝剪切模量 (MPa)", value=77000, step=1000, key="edit_G_core")
+    E_hypo = st.number_input("海波管杨氏模量 (MPa)", value=50000, step=1000, key="edit_E_hypo")
+    G_hypo = st.number_input("海波管剪切模量 (MPa)", value=19231, step=1000, key="edit_G_hypo")
 
     st.subheader("几何参数")
-    D_o = st.number_input("海波管外径 (mm)", value=0.33, step=0.01)
-    D_i = st.number_input("海波管内径 (mm)", value=0.23, step=0.01)
-    w_s = st.number_input("槽宽 (mm)", value=0.03, step=0.01)
-    L_total = st.number_input("导丝总长 (mm)", value=350, step=10)
+    D_o = st.number_input("海波管外径 (mm)", value=0.33, step=0.01, key="edit_D_o")
+    D_i = st.number_input("海波管内径 (mm)", value=0.23, step=0.01, key="edit_D_i")
+    w_s = st.number_input("槽宽 (mm)", value=0.03, step=0.01, key="edit_w_s")
+    L_total = st.number_input("导丝总长 (mm)", value=350, step=10, key="edit_L_total")
 
     st.subheader("载荷参数")
-    F = st.number_input("远端横向力 F (N)", value=0.001, step=0.001, format="%.4f")
-    T0 = st.number_input("近端扭矩 T0 (N·mm)", value=1.0, step=0.1)
+    F = st.number_input("远端横向力 F (N)", value=0.001, step=0.001, format="%.4f", key="edit_F")
+    T0 = st.number_input("近端扭矩 T0 (N·mm)", value=1.0, step=0.1, key="edit_T0")
 
     st.subheader("弹簧圈范围")
-    spring_start = st.number_input("弹簧圈起始位置 (mm)", value=st.session_state.current_spring[0], step=5)
-    spring_end = st.number_input("弹簧圈结束位置 (mm)", value=st.session_state.current_spring[1], step=5)
+    spring_start = st.number_input("弹簧圈起始位置 (mm)", value=st.session_state.current_spring[0], step=5, key="edit_spring_start")
+    spring_end = st.number_input("弹簧圈结束位置 (mm)", value=st.session_state.current_spring[1], step=5, key="edit_spring_end")
     st.session_state.current_spring = (spring_start, spring_end)
 
     st.subheader("点胶区间")
-    glue_text = st.text_area("格式: start,end,type (每行一个)", value=st.session_state.current_glue)
+    glue_text = st.text_area("格式: start,end,type (每行一个)", value=st.session_state.current_glue, key="edit_glue")
     st.session_state.current_glue = glue_text
 
     st.subheader("芯丝直径分段表")
-    edited_core = st.data_editor(st.session_state.current_core, num_rows="dynamic")
+    edited_core = st.data_editor(st.session_state.current_core, num_rows="dynamic", key="edit_core_editor")
     st.session_state.current_core = edited_core
 
     st.subheader("海波管开槽函数 (b(x), Z(x))")
-    uploaded_file = st.file_uploader("上传海波管参数 Excel/CSV 文件 (可选)", type=["xlsx", "xls", "csv"])
+    uploaded_file = st.file_uploader("上传海波管参数 Excel/CSV 文件 (可选)", type=["xlsx", "xls", "csv"], key="hypo_upload")
     if uploaded_file is not None:
         try:
             if uploaded_file.name.endswith(".csv"):
@@ -278,6 +266,7 @@ with st.sidebar:
                     lines.append(f"{row['start']},{row['end']},{row['b_expr']},{row['Z_expr']}")
                 uploaded_text = "\n".join(lines)
                 st.session_state.current_hypo_text = uploaded_text
+                st.session_state.edit_hypo_text = uploaded_text  # 同步更新 text_area
                 st.success("文件已加载，已填充下方文本框")
             else:
                 st.error(f"文件缺少列，必需列: {', '.join(required)}")
@@ -285,45 +274,30 @@ with st.sidebar:
             st.error(f"读取文件出错: {e}")
 
     st.markdown("每行一个区间：`start,end,b_expr,Z_expr`，支持变量 `x`，支持 `+ - * / **` 和括号")
-    hypo_text = st.text_area("海波管函数", value=st.session_state.current_hypo_text, height=200)
+    hypo_text = st.text_area("海波管函数", value=st.session_state.current_hypo_text, height=200, key="edit_hypo_text")
     st.session_state.current_hypo_text = hypo_text
 
     st.subheader("传递系数")
     with st.expander("完全点胶区 (full)"):
-        full_b = st.number_input("弯曲", value=st.session_state.full_b, step=0.05)
-        st.session_state.full_b = full_b
-        full_t = st.number_input("扭转", value=st.session_state.full_t, step=0.05)
-        st.session_state.full_t = full_t
-        full_a = st.number_input("轴向", value=st.session_state.full_a, step=0.05)
-        st.session_state.full_a = full_a
+        full_b = st.number_input("弯曲", value=1.0, step=0.05, key="full_b")
+        full_t = st.number_input("扭转", value=1.0, step=0.05, key="full_t")
+        full_a = st.number_input("轴向", value=1.0, step=0.05, key="full_a")
     with st.expander("芯丝+弹簧圈点胶区 (core_spring)"):
-        cs_b = st.number_input("弯曲", value=st.session_state.core_spring_b, step=0.05)
-        st.session_state.core_spring_b = cs_b
-        cs_t = st.number_input("扭转", value=st.session_state.core_spring_t, step=0.05)
-        st.session_state.core_spring_t = cs_t
-        cs_a = st.number_input("轴向", value=st.session_state.core_spring_a, step=0.05)
-        st.session_state.core_spring_a = cs_a
+        cs_b = st.number_input("弯曲", value=0.9, step=0.05, key="cs_b")
+        cs_t = st.number_input("扭转", value=0.9, step=0.05, key="cs_t")
+        cs_a = st.number_input("轴向", value=0.0, step=0.05, key="cs_a")
     with st.expander("芯丝+海波管点胶区 (core_hypo)"):
-        ch_b = st.number_input("弯曲", value=st.session_state.core_hypo_b, step=0.05)
-        st.session_state.core_hypo_b = ch_b
-        ch_t = st.number_input("扭转", value=st.session_state.core_hypo_t, step=0.05)
-        st.session_state.core_hypo_t = ch_t
-        ch_a = st.number_input("轴向", value=st.session_state.core_hypo_a, step=0.05)
-        st.session_state.core_hypo_a = ch_a
+        ch_b = st.number_input("弯曲", value=1.0, step=0.05, key="ch_b")
+        ch_t = st.number_input("扭转", value=1.0, step=0.05, key="ch_t")
+        ch_a = st.number_input("轴向", value=1.0, step=0.05, key="ch_a")
     with st.expander("有弹簧圈无点胶区"):
-        sp_b = st.number_input("弯曲", value=st.session_state.spring_b, step=0.05)
-        st.session_state.spring_b = sp_b
-        sp_t = st.number_input("扭转", value=st.session_state.spring_t, step=0.05)
-        st.session_state.spring_t = sp_t
-        sp_a = st.number_input("轴向", value=st.session_state.spring_a, step=0.05)
-        st.session_state.spring_a = sp_a
+        sp_b = st.number_input("弯曲", value=0.9, step=0.05, key="sp_b")
+        sp_t = st.number_input("扭转", value=0.6, step=0.05, key="sp_t")
+        sp_a = st.number_input("轴向", value=0.0, step=0.05, key="sp_a")
     with st.expander("无弹簧圈无点胶区"):
-        ns_b = st.number_input("弯曲", value=st.session_state.no_spring_b, step=0.05)
-        st.session_state.no_spring_b = ns_b
-        ns_t = st.number_input("扭转", value=st.session_state.no_spring_t, step=0.05)
-        st.session_state.no_spring_t = ns_t
-        ns_a = st.number_input("轴向", value=st.session_state.no_spring_a, step=0.05)
-        st.session_state.no_spring_a = ns_a
+        ns_b = st.number_input("弯曲", value=0.85, step=0.05, key="ns_b")
+        ns_t = st.number_input("扭转", value=0.35, step=0.05, key="ns_t")
+        ns_a = st.number_input("轴向", value=0.0, step=0.05, key="ns_a")
 
     if st.button("保存当前版本", type="primary"):
         glue_intervals = []
@@ -372,9 +346,10 @@ with st.sidebar:
         st.session_state.current_hypo_text = default_hypo_v1
         st.session_state.current_spring = (0, 150)
         st.session_state.current_glue = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
-        # 同步传递系数为版本一默认值
-        for k, v in eta_defaults.items():
-            st.session_state[k] = v
+        # 同步更新带 key 的组件状态
+        st.session_state.edit_glue = st.session_state.current_glue
+        st.session_state.edit_hypo_text = st.session_state.current_hypo_text
+        st.session_state.edit_core_editor = default_core_v1.copy()
         st.rerun()
     if col2.button("版本二"):
         st.session_state.current_name = "Version 2 (Continuous)"
@@ -382,8 +357,9 @@ with st.sidebar:
         st.session_state.current_hypo_text = default_hypo_v2
         st.session_state.current_spring = (0, 150)
         st.session_state.current_glue = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
-        for k, v in eta_defaults.items():
-            st.session_state[k] = v
+        st.session_state.edit_glue = st.session_state.current_glue
+        st.session_state.edit_hypo_text = st.session_state.current_hypo_text
+        st.session_state.edit_core_editor = default_core_v1.copy()
         st.rerun()
     if col3.button("版本三"):
         st.session_state.current_name = "Version 3 (New)"
@@ -391,8 +367,9 @@ with st.sidebar:
         st.session_state.current_hypo_text = default_hypo_v3
         st.session_state.current_spring = (0, 120)
         st.session_state.current_glue = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
-        for k, v in eta_defaults.items():
-            st.session_state[k] = v
+        st.session_state.edit_glue = st.session_state.current_glue
+        st.session_state.edit_hypo_text = st.session_state.current_hypo_text
+        st.session_state.edit_core_editor = default_core_v3.copy()
         st.rerun()
 
 # ==================== 主区域 ====================
@@ -402,6 +379,7 @@ if not st.session_state.saved_versions:
 else:
     for idx, ver in enumerate(st.session_state.saved_versions):
         col1, col2, col3 = st.columns([3,1,1])
+        # 可编辑名称
         new_name = col1.text_input(
             "版本名称",
             value=ver['name'],
@@ -422,18 +400,22 @@ else:
             st.session_state.full_b = ver['eta']['full_b']
             st.session_state.full_t = ver['eta']['full_t']
             st.session_state.full_a = ver['eta']['full_a']
-            st.session_state.core_spring_b = ver['eta']['core_spring_b']
-            st.session_state.core_spring_t = ver['eta']['core_spring_t']
-            st.session_state.core_spring_a = ver['eta']['core_spring_a']
-            st.session_state.core_hypo_b = ver['eta']['core_hypo_b']
-            st.session_state.core_hypo_t = ver['eta']['core_hypo_t']
-            st.session_state.core_hypo_a = ver['eta']['core_hypo_a']
-            st.session_state.spring_b = ver['eta']['spring_b']
-            st.session_state.spring_t = ver['eta']['spring_t']
-            st.session_state.spring_a = ver['eta']['spring_a']
-            st.session_state.no_spring_b = ver['eta']['no_spring_b']
-            st.session_state.no_spring_t = ver['eta']['no_spring_t']
-            st.session_state.no_spring_a = ver['eta']['no_spring_a']
+            st.session_state.cs_b = ver['eta']['core_spring_b']
+            st.session_state.cs_t = ver['eta']['core_spring_t']
+            st.session_state.cs_a = ver['eta']['core_spring_a']
+            st.session_state.ch_b = ver['eta']['core_hypo_b']
+            st.session_state.ch_t = ver['eta']['core_hypo_t']
+            st.session_state.ch_a = ver['eta']['core_hypo_a']
+            st.session_state.sp_b = ver['eta']['spring_b']
+            st.session_state.sp_t = ver['eta']['spring_t']
+            st.session_state.sp_a = ver['eta']['spring_a']
+            st.session_state.ns_b = ver['eta']['no_spring_b']
+            st.session_state.ns_t = ver['eta']['no_spring_t']
+            st.session_state.ns_a = ver['eta']['no_spring_a']
+            # 更新带key组件
+            st.session_state.edit_glue = st.session_state.current_glue
+            st.session_state.edit_hypo_text = st.session_state.current_hypo_text
+            st.session_state.edit_core_editor = ver['core_df'].copy()
             st.rerun()
         if col3.button("删除", key=f"del_{idx}"):
             st.session_state.saved_versions.pop(idx)
