@@ -262,9 +262,7 @@ else:
         layer = layers[i]
         r_in = layer['r_in']
         r_out = layer['r_out']
-        # 外圆
         ax_cross.add_patch(plt.Circle((0, 0), r_out, color=colors[i], alpha=0.6))
-        # 内圆（白色）形成环
         ax_cross.add_patch(plt.Circle((0, 0), r_in, color='white', fill=True))
 
     # 最内腔（如果内半径大于0）
@@ -281,33 +279,31 @@ else:
     ax_cross.set_ylim(-layers[-1]['r_out'] * 1.2, layers[-1]['r_out'] * 1.2)
     ax_cross.set_aspect('equal')
     ax_cross.axis('off')
-    st.pyplot(fig_cross)   # 不使用 use_container_width，兼容性更好
+    st.pyplot(fig_cross)
 
-    # 堆叠条形图
-    st.subheader("Layer Contributions to Stiffness")
-    layer_labels = [f"Layer {i+1}" for i in range(len(layers))]
-    colors = plt.cm.tab10(np.linspace(0, 1, len(layers)))
+    # 新增：各层贡献百分比表格
+    st.subheader("Layer Contributions (%)")
+    # 计算百分比，防止除零
+    if EA_total > 0:
+        ea_pct = [f"{val/EA_total*100:.2f}%" for val in EA_contrib]
+    else:
+        ea_pct = ["0.00%"] * len(layers)
+    if EI_total > 0:
+        ei_pct = [f"{val/EI_total*100:.2f}%" for val in EI_contrib]
+    else:
+        ei_pct = ["0.00%"] * len(layers)
+    if Kp_total > 0:
+        kp_pct = [f"{val/Kp_total*100:.2f}%" for val in Kp_contrib]
+    else:
+        kp_pct = ["0.00%"] * len(layers)
 
-    fig_bar, axes_bar = plt.subplots(1, 3, figsize=(12, 4))
-    fig_bar.suptitle("Layer Contributions to Stiffness", y=1.02, fontsize=14)
-
-    axes_bar[0].bar(layer_labels, EA_contrib, color=colors)
-    axes_bar[0].set_title('Axial Stiffness (EA)', fontsize=12)
-    axes_bar[0].set_ylabel('N')
-    axes_bar[0].grid(axis='y', linestyle='--', alpha=0.7)
-
-    axes_bar[1].bar(layer_labels, EI_contrib, color=colors)
-    axes_bar[1].set_title('Bending Stiffness (EI)', fontsize=12)
-    axes_bar[1].set_ylabel('N·mm²')
-    axes_bar[1].grid(axis='y', linestyle='--', alpha=0.7)
-
-    axes_bar[2].bar(layer_labels, Kp_contrib, color=colors)
-    axes_bar[2].set_title('Crush Stiffness (Kp)', fontsize=12)
-    axes_bar[2].set_ylabel('N/mm')
-    axes_bar[2].grid(axis='y', linestyle='--', alpha=0.7)
-
-    fig_bar.tight_layout(rect=[0, 0, 1, 0.95])
-    st.pyplot(fig_bar)
+    contrib_df = pd.DataFrame({
+        "Layer": [f"L{i+1}" for i in range(len(layers))],
+        "EA (%)": ea_pct,
+        "EI (%)": ei_pct,
+        "Kp (%)": kp_pct
+    })
+    st.dataframe(contrib_df, use_container_width=True)
 
     # 层参数表
     st.subheader("Layer Parameters")
