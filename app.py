@@ -696,7 +696,7 @@ else:
 
             # 自动展示改进对比
             st.markdown("---")
-            st.subheader("原版 vs 改进版变形对比")
+            st.subheader("原版 vs 改进版变形与刚度对比")
             for ver in st.session_state.saved_versions:
                 x = np.linspace(0, ver['L_total'], 500)
                 params = {
@@ -715,27 +715,52 @@ else:
                     'glue_intervals': ver['glue_intervals'],
                 }
                 # 原版
-                _, _, _, _, _, _, y_orig, phi_orig = compute_version(
+                EI_orig, GJ_orig, EA_orig, _, _, _, y_orig, phi_orig = compute_version(
                     x, ver['core_df'], ver['hypo_segments'], params, ver['eta'], smooth_eta=False, smooth_core=False
                 )
-                # 改进版（平滑传递系数和芯丝过渡）
-                _, _, _, _, _, _, y_imp, phi_imp = compute_version(
+                # 改进版
+                EI_imp, GJ_imp, EA_imp, _, _, _, y_imp, phi_imp = compute_version(
                     x, ver['core_df'], ver['hypo_segments'], params, ver['eta'], smooth_eta=True, smooth_core=True
                 )
 
-                fig, axes = plt.subplots(2, 1, figsize=(10, 6))
-                axes[0].plot(x, y_orig, label='Original', color='blue')
-                axes[0].plot(x, y_imp, label='Improved', color='orange', linestyle='--')
-                axes[0].set_ylabel('Deflection (mm)')
-                axes[0].grid(True)
-                axes[0].legend()
-                axes[0].set_title(f"{ver['name']} - Deflection")
+                # 变形对比图
+                fig_def, axes_def = plt.subplots(2, 1, figsize=(10, 6))
+                axes_def[0].plot(x, y_orig, label='Original', color='blue')
+                axes_def[0].plot(x, y_imp, label='Improved', color='orange', linestyle='--')
+                axes_def[0].set_ylabel('Deflection (mm)')
+                axes_def[0].grid(True)
+                axes_def[0].legend()
+                axes_def[0].set_title(f"{ver['name']} - Deflection")
 
-                axes[1].plot(x, phi_orig, label='Original', color='blue')
-                axes[1].plot(x, phi_imp, label='Improved', color='orange', linestyle='--')
-                axes[1].set_ylabel('Twist angle (rad)')
-                axes[1].set_xlabel('Distance from distal end (mm)')
-                axes[1].grid(True)
-                axes[1].legend()
+                axes_def[1].plot(x, phi_orig, label='Original', color='blue')
+                axes_def[1].plot(x, phi_imp, label='Improved', color='orange', linestyle='--')
+                axes_def[1].set_ylabel('Twist angle (rad)')
+                axes_def[1].set_xlabel('Distance from distal end (mm)')
+                axes_def[1].grid(True)
+                axes_def[1].legend()
 
-                st.pyplot(fig)
+                st.pyplot(fig_def)
+
+                # 刚度对比图
+                fig_stiff, axes_stiff = plt.subplots(3, 1, figsize=(10, 9))
+                axes_stiff[0].plot(x, EI_orig, label='Original', color='blue')
+                axes_stiff[0].plot(x, EI_imp, label='Improved', color='orange', linestyle='--')
+                axes_stiff[0].set_ylabel('Bending stiffness EI (N·mm²)')
+                axes_stiff[0].grid(True)
+                axes_stiff[0].legend()
+                axes_stiff[0].set_title(f"{ver['name']} - Bending stiffness")
+
+                axes_stiff[1].plot(x, GJ_orig, label='Original', color='blue')
+                axes_stiff[1].plot(x, GJ_imp, label='Improved', color='orange', linestyle='--')
+                axes_stiff[1].set_ylabel('Torsional stiffness GJ (N·mm²)')
+                axes_stiff[1].grid(True)
+                axes_stiff[1].legend()
+
+                axes_stiff[2].plot(x, EA_orig, label='Original', color='blue')
+                axes_stiff[2].plot(x, EA_imp, label='Improved', color='orange', linestyle='--')
+                axes_stiff[2].set_ylabel('Axial stiffness EA (N)')
+                axes_stiff[2].set_xlabel('Distance from distal end (mm)')
+                axes_stiff[2].grid(True)
+                axes_stiff[2].legend()
+
+                st.pyplot(fig_stiff)
