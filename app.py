@@ -158,15 +158,12 @@ def compute_version(x, core_df, hypo_segments, params, eta_global):
     tau_tors = T_hypo / (2 * b_arr * t_wall * r_m)
     sigma_eq = np.sqrt(sigma_bend**2 + 3 * tau_tors**2)
 
-    # ---------- 变形计算 ----------
-    # 弯曲挠度（悬臂梁：远端加载，近端固定）
-    # 转角积分，然后调整使近端转角为零
+    # 变形计算
     theta = cumulative_trapezoid(M_total / EI_total, x, initial=0)
     theta = theta - theta[-1]  # 近端转角为0
     y_def = cumulative_trapezoid(theta, x, initial=0)
     y_def = y_def - y_def[-1]  # 近端挠度为0
 
-    # 扭转角（远端自由，近端施加扭矩，但这里计算相对远端的扭转角，可直接积分）
     phi = cumulative_trapezoid(T_total / GJ_total, x, initial=0)
 
     return (EI_total, GJ_total, EA_total,
@@ -211,6 +208,79 @@ default_hypo_v3 = """0,10,0.036,0.058
 145,180,-0.000030204*(x-145)**2+(0.037-1225*(-0.000030204))/35*(x-145)+0.115,0.095+0.038*(x-145)/35
 180,350,0.152,0.133"""
 
+# ==================== 参数改进建议函数 ====================
+def generate_suggestions(ver):
+    suggestions = []
+    hypo_segments = ver['hypo_segments']
+    for i, seg in enumerate(hypo_segments):
+        if i == 0:
+            continue
+        prev = hypo_segments[i-1]
+        boundary = seg[0]
+        if abs(prev[1] - boundary) > 1e-6:
+            suggestions.append({
+                'type': '海波管分段不连续',
+                'position': boundary,
+                'description': f"前段结束于 {prev[1]} mm，后段开始于 {boundary} mm，存在间隙或重叠。",
+                'formula': "调整区间使前段 end 等于后段 start。",
+            })
+        else:
+            delta = 2.0
+            xb = boundary
+            suggestions.append({
+                'type': '海波管参数突变',
+                'position': boundary,
+                'description': f"在 x={boundary} mm 处参数变化，建议使用三次样条过渡。",
+                'formula': (
+                    f"在 [{xb-delta}, {xb+delta}] mm 区间内使用三次多项式：\n"
+                    f"f(x) = a0 + a1*(x-{xb}) + a2*(x-{xb})^2 + a3*(x-{xb})^3\n"
+                    f"系数由端点值和斜率匹配条件确定。"
+                ),
+            })
+    glue = ver['glue_intervals']
+    for g in glue:
+        for boundary in [g[0], g[1]]:
+            delta = 2.0
+            x0 = boundary
+            suggestions.append({
+                'type': '传递系数阶跃',
+                'position': boundary,
+                'description': f"点胶区间边界 x={boundary} mm 处传递系数可能阶跃。",
+                'formula': (
+                    f"在 [{x0-delta}, {x0+delta}] mm 内使用 S 形过渡：\n"
+                    f"η(x) = η1 + (η2-η1) * S((x-{x0})/Δ)\n"
+                    f"S(t) = 0.5 + 0.75*t - 0.25*t^3, 当 -1 < t < 1。"
+                ),
+            })
+    for boundary in [ver['spring_start'], ver['spring_end']]:
+        delta = 2.0
+        x0 = boundary
+        suggestions.append({
+            'type': '弹簧圈边界传递系数变化',
+            'position': boundary,
+            'description': f"弹簧圈边界 x={boundary} mm 处传递系数变化。",
+            'formula': (
+                f"在 [{x0-delta}, {x0+delta}] mm 内使用 S 形过渡，同传递系数阶跃公式。"
+            ),
+        })
+    core_df = ver['core_df']
+    for _, row in core_df.iterrows():
+        if row['d_start'] != row['d_end']:
+            L_t = row['end'] - row['start']
+            x1 = row['start']
+            d1 = row['d_start']
+            d2 = row['d_end']
+            suggestions.append({
+                'type': '芯丝直径线性过渡',
+                'position': f"{x1}-{row['end']} mm",
+                'description': f"当前为线性过渡，建议改为 S 形曲线。",
+                'formula': (
+                    f"d(x) = {d1} + ({d2}-{d1}) * [3*((x-{x1})/{L_t})^2 - 2*((x-{x1})/{L_t})^3]"
+                ),
+            })
+            break
+    return suggestions
+
 # ==================== 初始化 session_state ====================
 if 'saved_versions' not in st.session_state:
     st.session_state.saved_versions = []
@@ -225,7 +295,6 @@ if 'current_spring' not in st.session_state:
 if 'current_glue' not in st.session_state:
     st.session_state.current_glue = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
 
-# 传递系数默认值
 eta_keys = ['full_b', 'full_t', 'full_a', 'core_spring_b', 'core_spring_t', 'core_spring_a',
             'core_hypo_b', 'core_hypo_t', 'core_hypo_a', 'spring_b', 'spring_t', 'spring_a',
             'no_spring_b', 'no_spring_t', 'no_spring_a']
@@ -461,7 +530,6 @@ else:
         else:
             x = np.linspace(0, L_total, 500)
 
-            # 刚度图
             fig1, axes1 = plt.subplots(3, 1, figsize=(10, 12))
             fig1.suptitle("Stiffness Comparison")
             axes1[0].set_ylabel('Bending stiffness EI (N·mm²)')
@@ -471,7 +539,6 @@ else:
             for ax in axes1:
                 ax.grid(True)
 
-            # 应力图
             fig2, axes2 = plt.subplots(3, 1, figsize=(10, 12))
             fig2.suptitle("Hypo-tube Connector Stress Comparison")
             axes2[0].set_ylabel('Bending normal stress (MPa)')
@@ -481,7 +548,6 @@ else:
             for ax in axes2:
                 ax.grid(True)
 
-            # 变形图（新增）
             fig3, axes3 = plt.subplots(2, 1, figsize=(10, 8))
             fig3.suptitle("Deformation Comparison")
             axes3[0].set_ylabel('Deflection (mm)')
@@ -489,6 +555,23 @@ else:
             axes3[1].set_xlabel('Distance from distal end (mm)')
             for ax in axes3:
                 ax.grid(True)
+
+            mutation_points = set()
+            for idx in selected_indices:
+                ver = st.session_state.saved_versions[idx]
+                mutation_points.add(ver['spring_start'])
+                mutation_points.add(ver['spring_end'])
+                for g_start, g_end, _ in ver['glue_intervals']:
+                    mutation_points.add(g_start)
+                    mutation_points.add(g_end)
+                for seg in ver['hypo_segments']:
+                    mutation_points.add(seg[0])
+                    mutation_points.add(seg[1])
+            mutation_points = {p for p in mutation_points if 0 <= p <= L_total}
+
+            for xp in mutation_points:
+                axes3[0].axvline(xp, color='gray', linestyle='--', linewidth=1, alpha=0.7)
+                axes3[1].axvline(xp, color='gray', linestyle='--', linewidth=1, alpha=0.7)
 
             for idx in selected_indices:
                 ver = st.session_state.saved_versions[idx]
@@ -515,21 +598,17 @@ else:
                     x, ver['core_df'], ver['hypo_segments'], params, ver['eta']
                 )
 
-                # 刚度
                 axes1[0].plot(x, EI_total, color=color, linewidth=2, label=label)
                 axes1[1].plot(x, GJ_total, color=color, linewidth=2, label=label)
                 axes1[2].plot(x, EA_total, color=color, linewidth=2, label=label)
 
-                # 应力
                 axes2[0].plot(x, sigma_bend, color=color, linewidth=2, label=label)
                 axes2[1].plot(x, tau_tors, color=color, linewidth=2, label=label)
                 axes2[2].plot(x, sigma_eq, color=color, linewidth=2, label=label)
 
-                # 变形
                 axes3[0].plot(x, y_def, color=color, linewidth=2, label=label)
                 axes3[1].plot(x, phi, color=color, linewidth=2, label=label)
 
-            # 图例
             axes1[0].legend(); axes1[1].legend(); axes1[2].legend()
             axes2[0].legend(); axes2[1].legend(); axes2[2].legend()
             axes3[0].legend(); axes3[1].legend()
@@ -537,3 +616,18 @@ else:
             st.pyplot(fig1)
             st.pyplot(fig2)
             st.pyplot(fig3)
+
+    if st.button("生成参数改进建议"):
+        if not st.session_state.saved_versions:
+            st.warning("请先保存版本")
+        else:
+            for ver in st.session_state.saved_versions:
+                st.subheader(ver['name'])
+                suggestions = generate_suggestions(ver)
+                if not suggestions:
+                    st.write("未发现需要改进的参数。")
+                for s in suggestions:
+                    st.markdown(f"**{s['type']}** (位置: {s['position']})")
+                    st.write(s['description'])
+                    st.markdown(f"```\n{s['formula']}\n```")
+                    st.divider()
