@@ -63,8 +63,17 @@ def smooth_step(x, x0, delta, y1, y2):
         s = 0.5 + 0.75 * t - 0.25 * t**3
         return y1 + (y2 - y1) * s
 
+def smooth_core_diameter(x, start, end, d1, d2):
+    """芯丝直径 S 形过渡（三次 Hermite）"""
+    if d1 == d2:
+        return d1
+    L_t = end - start
+    t = (x - start) / L_t
+    t = max(0.0, min(1.0, t))
+    return d1 + (d2 - d1) * (3 * t**2 - 2 * t**3)
+
 # ==================== 计算函数 ====================
-def compute_version(x, core_df, hypo_segments, params, eta_global, smooth_eta=False):
+def compute_version(x, core_df, hypo_segments, params, eta_global, smooth_eta=False, smooth_core=False):
     E_core = params['E_core']
     G_core = params['G_core']
     E_hypo = params['E_hypo']
@@ -97,8 +106,13 @@ def compute_version(x, core_df, hypo_segments, params, eta_global, smooth_eta=Fa
     def interp_core(x_val):
         for _, row in core_df.iterrows():
             if row['start'] <= x_val < row['end']:
-                t = (x_val - row['start']) / (row['end'] - row['start'])
-                return row['d_start'] + t * (row['d_end'] - row['d_start'])
+                if row['d_start'] == row['d_end']:
+                    return row['d_start']
+                if smooth_core:
+                    return smooth_core_diameter(x_val, row['start'], row['end'], row['d_start'], row['d_end'])
+                else:
+                    t = (x_val - row['start']) / (row['end'] - row['start'])
+                    return row['d_start'] + t * (row['d_end'] - row['d_start'])
         if x_val < core_df.iloc[0]['start']:
             return core_df.iloc[0]['d_start']
         else:
@@ -138,8 +152,8 @@ def compute_version(x, core_df, hypo_segments, params, eta_global, smooth_eta=Fa
                         eta_a = eta_global['core_hypo_a']
                     break
         else:
-            # 平滑版本
-            spring_delta = 3.0
+            # 平滑版本：弹簧圈边界 delta=5，点胶 delta=3
+            spring_delta = 5.0
             if xi < spring_start - spring_delta:
                 pass
             elif xi < spring_start + spring_delta:
@@ -154,7 +168,8 @@ def compute_version(x, core_df, hypo_segments, params, eta_global, smooth_eta=Fa
                 eta_b = smooth_step(xi, spring_end, spring_delta, eta_global['spring_b'], eta_global['no_spring_b'])
                 eta_t = smooth_step(xi, spring_end, spring_delta, eta_global['spring_t'], eta_global['no_spring_t'])
                 eta_a = smooth_step(xi, spring_end, spring_delta, eta_global['spring_a'], eta_global['no_spring_a'])
-            glue_delta = 2.0
+
+            glue_delta = 3.0
             for g_start, g_end, g_type in glue_intervals:
                 if g_type == 'full':
                     gb = eta_global['full_b']; gt = eta_global['full_t']; ga = eta_global['full_a']
@@ -642,7 +657,7 @@ else:
                 }
 
                 EI_total, GJ_total, EA_total, sigma_bend, tau_tors, sigma_eq, y_def, phi = compute_version(
-                    x, ver['core_df'], ver['hypo_segments'], params, ver['eta'], smooth_eta=False
+                    x, ver['core_df'], ver['hypo_segments'], params, ver['eta'], smooth_eta=False, smooth_core=False
                 )
 
                 axes1[0].plot(x, EI_total, color=color, linewidth=2, label=label)
@@ -701,11 +716,11 @@ else:
                 }
                 # 原版
                 _, _, _, _, _, _, y_orig, phi_orig = compute_version(
-                    x, ver['core_df'], ver['hypo_segments'], params, ver['eta'], smooth_eta=False
+                    x, ver['core_df'], ver['hypo_segments'], params, ver['eta'], smooth_eta=False, smooth_core=False
                 )
-                # 改进版（平滑传递系数）
+                # 改进版（平滑传递系数和芯丝过渡）
                 _, _, _, _, _, _, y_imp, phi_imp = compute_version(
-                    x, ver['core_df'], ver['hypo_segments'], params, ver['eta'], smooth_eta=True
+                    x, ver['core_df'], ver['hypo_segments'], params, ver['eta'], smooth_eta=True, smooth_core=True
                 )
 
                 fig, axes = plt.subplots(2, 1, figsize=(10, 6))
