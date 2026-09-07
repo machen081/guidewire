@@ -51,8 +51,20 @@ def calc_b_Z(x, segments):
         Z = safe_eval(segments[-1][3], segments[-1][1])
     return b, Z
 
+# ==================== 平滑过渡函数 ====================
+def smooth_step(x, x0, delta, y1, y2):
+    """S形过渡：在 x0 ± delta 内从 y1 平滑变到 y2"""
+    if x < x0 - delta:
+        return y1
+    elif x > x0 + delta:
+        return y2
+    else:
+        t = (x - x0) / delta
+        s = 0.5 + 0.75 * t - 0.25 * t**3
+        return y1 + (y2 - y1) * s
+
 # ==================== 计算函数 ====================
-def compute_version(x, core_df, hypo_segments, params, eta_global):
+def compute_version(x, core_df, hypo_segments, params, eta_global, smooth_eta=False):
     E_core = params['E_core']
     G_core = params['G_core']
     E_hypo = params['E_hypo']
@@ -98,30 +110,67 @@ def compute_version(x, core_df, hypo_segments, params, eta_global):
         b_arr[i] = b_val
         Z_arr[i] = Z_val
 
+        # 传递系数
         eta_b = eta_global['no_spring_b']
         eta_t = eta_global['no_spring_t']
         eta_a = eta_global['no_spring_a']
 
-        if spring_start <= xi < spring_end:
-            eta_b = eta_global['spring_b']
-            eta_t = eta_global['spring_t']
-            eta_a = eta_global['spring_a']
+        if not smooth_eta:
+            # 原版阶跃
+            if spring_start <= xi < spring_end:
+                eta_b = eta_global['spring_b']
+                eta_t = eta_global['spring_t']
+                eta_a = eta_global['spring_a']
 
-        for g_start, g_end, g_type in glue_intervals:
-            if g_start <= xi < g_end:
+            for g_start, g_end, g_type in glue_intervals:
+                if g_start <= xi < g_end:
+                    if g_type == 'full':
+                        eta_b = eta_global['full_b']
+                        eta_t = eta_global['full_t']
+                        eta_a = eta_global['full_a']
+                    elif g_type == 'core_spring':
+                        eta_b = eta_global['core_spring_b']
+                        eta_t = eta_global['core_spring_t']
+                        eta_a = eta_global['core_spring_a']
+                    elif g_type == 'core_hypo':
+                        eta_b = eta_global['core_hypo_b']
+                        eta_t = eta_global['core_hypo_t']
+                        eta_a = eta_global['core_hypo_a']
+                    break
+        else:
+            # 平滑版本
+            spring_delta = 3.0
+            if xi < spring_start - spring_delta:
+                pass
+            elif xi < spring_start + spring_delta:
+                eta_b = smooth_step(xi, spring_start, spring_delta, eta_global['no_spring_b'], eta_global['spring_b'])
+                eta_t = smooth_step(xi, spring_start, spring_delta, eta_global['no_spring_t'], eta_global['spring_t'])
+                eta_a = smooth_step(xi, spring_start, spring_delta, eta_global['no_spring_a'], eta_global['spring_a'])
+            elif xi < spring_end - spring_delta:
+                eta_b = eta_global['spring_b']
+                eta_t = eta_global['spring_t']
+                eta_a = eta_global['spring_a']
+            elif xi < spring_end + spring_delta:
+                eta_b = smooth_step(xi, spring_end, spring_delta, eta_global['spring_b'], eta_global['no_spring_b'])
+                eta_t = smooth_step(xi, spring_end, spring_delta, eta_global['spring_t'], eta_global['no_spring_t'])
+                eta_a = smooth_step(xi, spring_end, spring_delta, eta_global['spring_a'], eta_global['no_spring_a'])
+            glue_delta = 2.0
+            for g_start, g_end, g_type in glue_intervals:
                 if g_type == 'full':
-                    eta_b = eta_global['full_b']
-                    eta_t = eta_global['full_t']
-                    eta_a = eta_global['full_a']
+                    gb = eta_global['full_b']; gt = eta_global['full_t']; ga = eta_global['full_a']
                 elif g_type == 'core_spring':
-                    eta_b = eta_global['core_spring_b']
-                    eta_t = eta_global['core_spring_t']
-                    eta_a = eta_global['core_spring_a']
+                    gb = eta_global['core_spring_b']; gt = eta_global['core_spring_t']; ga = eta_global['core_spring_a']
                 elif g_type == 'core_hypo':
-                    eta_b = eta_global['core_hypo_b']
-                    eta_t = eta_global['core_hypo_t']
-                    eta_a = eta_global['core_hypo_a']
-                break
+                    gb = eta_global['core_hypo_b']; gt = eta_global['core_hypo_t']; ga = eta_global['core_hypo_a']
+                else:
+                    continue
+                if g_start - glue_delta <= xi < g_start + glue_delta:
+                    current_b = eta_b; current_t = eta_t; current_a = eta_a
+                    eta_b = smooth_step(xi, g_start, glue_delta, current_b, gb)
+                    eta_t = smooth_step(xi, g_start, glue_delta, current_t, gt)
+                    eta_a = smooth_step(xi, g_start, glue_delta, current_a, ga)
+                elif g_start + glue_delta <= xi < g_end - glue_delta:
+                    eta_b = gb; eta_t = gt; eta_a = ga
 
         eta_b_arr[i] = eta_b
         eta_t_arr[i] = eta_t
@@ -158,11 +207,10 @@ def compute_version(x, core_df, hypo_segments, params, eta_global):
     tau_tors = T_hypo / (2 * b_arr * t_wall * r_m)
     sigma_eq = np.sqrt(sigma_bend**2 + 3 * tau_tors**2)
 
-    # 变形计算
     theta = cumulative_trapezoid(M_total / EI_total, x, initial=0)
-    theta = theta - theta[-1]  # 近端转角为0
+    theta = theta - theta[-1]
     y_def = cumulative_trapezoid(theta, x, initial=0)
-    y_def = y_def - y_def[-1]  # 近端挠度为0
+    y_def = y_def - y_def[-1]
 
     phi = cumulative_trapezoid(T_total / GJ_total, x, initial=0)
 
@@ -497,7 +545,6 @@ else:
             st.session_state.current_glue = "\n".join([f"{s},{e},{t}" for s,e,t in ver['glue_intervals']])
             hypo_lines = [f"{seg[0]},{seg[1]},{seg[2]},{seg[3]}" for seg in ver['hypo_segments']]
             st.session_state.current_hypo_text = "\n".join(hypo_lines)
-            # 传递系数
             st.session_state.full_b = ver['eta']['full_b']
             st.session_state.full_t = ver['eta']['full_t']
             st.session_state.full_a = ver['eta']['full_a']
@@ -595,7 +642,7 @@ else:
                 }
 
                 EI_total, GJ_total, EA_total, sigma_bend, tau_tors, sigma_eq, y_def, phi = compute_version(
-                    x, ver['core_df'], ver['hypo_segments'], params, ver['eta']
+                    x, ver['core_df'], ver['hypo_segments'], params, ver['eta'], smooth_eta=False
                 )
 
                 axes1[0].plot(x, EI_total, color=color, linewidth=2, label=label)
@@ -631,3 +678,49 @@ else:
                     st.write(s['description'])
                     st.markdown(f"```\n{s['formula']}\n```")
                     st.divider()
+
+            # 自动展示改进对比
+            st.markdown("---")
+            st.subheader("原版 vs 改进版变形对比")
+            for ver in st.session_state.saved_versions:
+                x = np.linspace(0, ver['L_total'], 500)
+                params = {
+                    'E_core': ver['E_core'],
+                    'G_core': ver['G_core'],
+                    'E_hypo': ver['E_hypo'],
+                    'G_hypo': ver['G_hypo'],
+                    'D_o': ver['D_o'],
+                    'D_i': ver['D_i'],
+                    'w_s': ver['w_s'],
+                    'L_total': ver['L_total'],
+                    'F': ver['F'],
+                    'T0': ver['T0'],
+                    'spring_start': ver['spring_start'],
+                    'spring_end': ver['spring_end'],
+                    'glue_intervals': ver['glue_intervals'],
+                }
+                # 原版
+                _, _, _, _, _, _, y_orig, phi_orig = compute_version(
+                    x, ver['core_df'], ver['hypo_segments'], params, ver['eta'], smooth_eta=False
+                )
+                # 改进版（平滑传递系数）
+                _, _, _, _, _, _, y_imp, phi_imp = compute_version(
+                    x, ver['core_df'], ver['hypo_segments'], params, ver['eta'], smooth_eta=True
+                )
+
+                fig, axes = plt.subplots(2, 1, figsize=(10, 6))
+                axes[0].plot(x, y_orig, label='Original', color='blue')
+                axes[0].plot(x, y_imp, label='Improved', color='orange', linestyle='--')
+                axes[0].set_ylabel('Deflection (mm)')
+                axes[0].grid(True)
+                axes[0].legend()
+                axes[0].set_title(f"{ver['name']} - Deflection")
+
+                axes[1].plot(x, phi_orig, label='Original', color='blue')
+                axes[1].plot(x, phi_imp, label='Improved', color='orange', linestyle='--')
+                axes[1].set_ylabel('Twist angle (rad)')
+                axes[1].set_xlabel('Distance from distal end (mm)')
+                axes[1].grid(True)
+                axes[1].legend()
+
+                st.pyplot(fig)
