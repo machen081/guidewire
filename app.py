@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.integrate import cumulative_trapezoid
 
 st.set_page_config(page_title="导丝刚度分析工具", layout="wide")
 
@@ -157,7 +158,20 @@ def compute_version(x, core_df, hypo_segments, params, eta_global):
     tau_tors = T_hypo / (2 * b_arr * t_wall * r_m)
     sigma_eq = np.sqrt(sigma_bend**2 + 3 * tau_tors**2)
 
-    return EI_total, GJ_total, EA_total, sigma_bend, tau_tors, sigma_eq
+    # ---------- 变形计算 ----------
+    # 弯曲挠度（悬臂梁：远端加载，近端固定）
+    # 转角积分，然后调整使近端转角为零
+    theta = cumulative_trapezoid(M_total / EI_total, x, initial=0)
+    theta = theta - theta[-1]  # 近端转角为0
+    y_def = cumulative_trapezoid(theta, x, initial=0)
+    y_def = y_def - y_def[-1]  # 近端挠度为0
+
+    # 扭转角（远端自由，近端施加扭矩，但这里计算相对远端的扭转角，可直接积分）
+    phi = cumulative_trapezoid(T_total / GJ_total, x, initial=0)
+
+    return (EI_total, GJ_total, EA_total,
+            sigma_bend, tau_tors, sigma_eq,
+            y_def, phi)
 
 # ==================== 默认数据 ====================
 default_core_v1 = pd.DataFrame([
@@ -447,6 +461,7 @@ else:
         else:
             x = np.linspace(0, L_total, 500)
 
+            # 刚度图
             fig1, axes1 = plt.subplots(3, 1, figsize=(10, 12))
             fig1.suptitle("Stiffness Comparison")
             axes1[0].set_ylabel('Bending stiffness EI (N·mm²)')
@@ -456,6 +471,7 @@ else:
             for ax in axes1:
                 ax.grid(True)
 
+            # 应力图
             fig2, axes2 = plt.subplots(3, 1, figsize=(10, 12))
             fig2.suptitle("Hypo-tube Connector Stress Comparison")
             axes2[0].set_ylabel('Bending normal stress (MPa)')
@@ -463,6 +479,15 @@ else:
             axes2[2].set_xlabel('Distance from distal end (mm)')
             axes2[2].set_ylabel('Von Mises stress (MPa)')
             for ax in axes2:
+                ax.grid(True)
+
+            # 变形图（新增）
+            fig3, axes3 = plt.subplots(2, 1, figsize=(10, 8))
+            fig3.suptitle("Deformation Comparison")
+            axes3[0].set_ylabel('Deflection (mm)')
+            axes3[1].set_ylabel('Twist angle (rad)')
+            axes3[1].set_xlabel('Distance from distal end (mm)')
+            for ax in axes3:
                 ax.grid(True)
 
             for idx in selected_indices:
@@ -486,24 +511,29 @@ else:
                     'glue_intervals': ver['glue_intervals'],
                 }
 
-                EI_total, GJ_total, EA_total, sigma_bend, tau_tors, sigma_eq = compute_version(
+                EI_total, GJ_total, EA_total, sigma_bend, tau_tors, sigma_eq, y_def, phi = compute_version(
                     x, ver['core_df'], ver['hypo_segments'], params, ver['eta']
                 )
 
+                # 刚度
                 axes1[0].plot(x, EI_total, color=color, linewidth=2, label=label)
                 axes1[1].plot(x, GJ_total, color=color, linewidth=2, label=label)
                 axes1[2].plot(x, EA_total, color=color, linewidth=2, label=label)
 
+                # 应力
                 axes2[0].plot(x, sigma_bend, color=color, linewidth=2, label=label)
                 axes2[1].plot(x, tau_tors, color=color, linewidth=2, label=label)
                 axes2[2].plot(x, sigma_eq, color=color, linewidth=2, label=label)
 
-            axes1[0].legend()
-            axes1[1].legend()
-            axes1[2].legend()
-            axes2[0].legend()
-            axes2[1].legend()
-            axes2[2].legend()
+                # 变形
+                axes3[0].plot(x, y_def, color=color, linewidth=2, label=label)
+                axes3[1].plot(x, phi, color=color, linewidth=2, label=label)
+
+            # 图例
+            axes1[0].legend(); axes1[1].legend(); axes1[2].legend()
+            axes2[0].legend(); axes2[1].legend(); axes2[2].legend()
+            axes3[0].legend(); axes3[1].legend()
 
             st.pyplot(fig1)
             st.pyplot(fig2)
+            st.pyplot(fig3)
