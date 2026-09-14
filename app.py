@@ -229,8 +229,11 @@ def generate_suggestions(ver):
             break
     return suggestions
 
-# ==================== 自动推荐点胶位置（只关注最大斜率最小化） ====================
-def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=2.0):
+# ==================== 自动推荐点胶位置（0.5mm步长，减小最大斜率） ====================
+def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=0.5):
+    """
+    扫描步长 0.5 mm，以减小扭转刚度最大斜率为目标。
+    """
     x = np.linspace(0, ver['L_total'], 500)
     x_coil = ver.get('spring_end', 120.0)
 
@@ -251,14 +254,10 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=2.0):
                 complex_params={**ver.get('complex_params', {}), 'eta_glue_peak': 0.90}
             )
             GJ = res[1]
-            # 一阶导数：刚度曲线的斜率
             dGJ = np.abs(np.diff(GJ) / np.diff(x))
-            # 最大斜率：全局最大
             max_slope = np.max(dGJ)
-            # 点胶区域附近的最大斜率
             mask = (x[:-1] >= gs - 5) & (x[:-1] <= ge + 5)
             local_slope = np.max(dGJ[mask]) if np.any(mask) else max_slope
-            # 评分：全局最大斜率为主，局部斜率为辅
             score = max_slope + 0.5 * local_slope
             return (gs, ge, max_slope, local_slope, score)
         except Exception:
@@ -328,7 +327,7 @@ def get_recommended_glue_position(ver, glue_length=10.0):
             max_slope = 0.0
         return fixed_start, fixed_end, max_slope, [(fixed_start, fixed_end, max_slope, max_slope, 0.0)], 'fixed'
     else:
-        return find_best_glue_position(ver, glue_length=glue_length, search_start=80.0, step=2.0)
+        return find_best_glue_position(ver, glue_length=glue_length, search_start=80.0, step=0.5)
 
 # ==================== 默认数据 ====================
 default_core_v1 = pd.DataFrame([
@@ -656,12 +655,12 @@ else:
                 st.pyplot(fig_def)
                 st.divider()
 
-                st.markdown("### 自动推荐点胶位置（目标：减小扭转刚度最大斜率）")
+                st.markdown("### 自动推荐点胶位置（目标：减小扭转刚度最大斜率，步长 0.5 mm）")
                 cp = ver.get('complex_params', {})
                 x_coil = ver.get('spring_end', 120.0)
                 st.write(f"弹簧圈末端：**{x_coil:.0f} mm**　|　螺距：**{cp.get('pitch', P_REF):.4f} mm**")
 
-                with st.spinner(f"正在确定 {ver['name']} 的推荐点胶位置..."):
+                with st.spinner(f"正在确定 {ver['name']} 的推荐点胶位置（0.5 mm 步长扫描，可能需要几十秒）..."):
                     best_start, best_end, best_slope, results, status = get_recommended_glue_position(
                         ver, glue_length=glue_length
                     )
@@ -681,12 +680,12 @@ else:
                 elif level == 'warning': st.warning(msg)
                 elif level == 'info': st.info(msg)
 
-                st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm）")
+                st.markdown(f"**推荐点胶位置：{best_start:.1f} – {best_end:.1f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm）")
                 if len(results) > 1:
-                    st.markdown("**候选排名（前5，按最大斜率最小化）：**")
-                    for i, r in enumerate(results[:5]):
+                    st.markdown("**候选排名（前10，按最大斜率最小化）：**")
+                    for i, r in enumerate(results[:10]):
                         gs, ge, ms, ls = r[0], r[1], r[2], r[3]
-                        st.write(f"{i+1}. {gs:.0f}–{ge:.0f} mm，最大斜率 {ms:.3f}，局部斜率 {ls:.3f}")
+                        st.write(f"{i+1}. {gs:.1f}–{ge:.1f} mm，最大斜率 {ms:.3f}，局部斜率 {ls:.3f}")
 
                 cp_full = {**cp, 'eta_glue_peak': 0.90}
 
@@ -711,7 +710,7 @@ else:
 
                 fig, axes = plt.subplots(2, 1, figsize=(11, 8))
                 axes[0].plot(x, GJ_orig, label='Original', color='blue', linewidth=2)
-                axes[0].plot(x, GJ_best, label=f'Recommended: {best_start:.0f}-{best_end:.0f} mm', color='green', linestyle='--', linewidth=2)
+                axes[0].plot(x, GJ_best, label=f'Recommended: {best_start:.1f}-{best_end:.1f} mm', color='green', linestyle='--', linewidth=2)
                 axes[0].set_ylabel('Torsional stiffness GJ (N·mm²)')
                 axes[0].grid(True); axes[0].legend()
                 axes[0].set_xlim(0, 200)
