@@ -243,29 +243,27 @@ def generate_suggestions(ver):
             break
     return suggestions
 
-# ==================== 自动推荐点胶位置 ====================
-def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, search_end=200.0, step=2.0):
+# ==================== 自动推荐点胶位置（分级搜索） ====================
+def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=2.0):
+    """
+    分级搜索最优点胶位置。
+    返回 (best_start, best_end, best_slope, results, status)
+    status: 'strict' | 'relaxed_avoid' | 'overrun' | 'any' | 'none'
+    """
     x = np.linspace(0, ver['L_total'], 500)
     cp = ver.get('complex_params', {})
     x_stretch = cp.get('x_stretch_start', 80.0)
     x_coil = cp.get('x_coil_end', 120.0)
     pitch_mode = cp.get('pitch_mode', 'constant')
 
-    effective_search_end = min(search_end, x_coil)
+    search_end = ver['L_total'] - glue_length
 
     base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
     base_glue = [(0, 1, 'full')]
     for g in ver['glue_intervals']:
         if g[0] > 200: base_glue.append(g)
 
-    results = []
-    for gs in np.arange(search_start, effective_search_end - glue_length, step):
-        ge = gs + glue_length
-        if ge > x_coil:
-            continue
-        if pitch_mode != 'constant':
-            if not (ge <= x_stretch or gs >= x_coil):
-                continue
+    def evaluate(gs, ge):
         test_glue = list(base_glue) + [(gs, ge, 'core_spring')]
         params = dict(base_params); params['glue_intervals'] = test_glue
         try:
@@ -278,14 +276,56 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, search_end
             max_slope = np.max(dGJ)
             mask = (x[:-1] >= gs - 5) & (x[:-1] <= ge + 5)
             local_slope = np.max(dGJ[mask]) if np.any(mask) else max_slope
-            results.append((gs, ge, max_slope, local_slope))
+            return (gs, ge, max_slope, local_slope)
         except Exception:
-            continue
-    if not results:
-        return None, None, None, []
-    results.sort(key=lambda r: r[3] + 0.3 * r[2])
-    best = results[0]
-    return best[0], best[1], best[2], results
+            return None
+
+    def scan(constraint_fn):
+        results = []
+        if search_end <= search_start:
+            return results
+        for gs in np.arange(search_start, search_end + step, step):
+            ge = gs + glue_length
+            if ge > ver['L_total']:
+                continue
+            if not constraint_fn(gs, ge):
+                continue
+            r = evaluate(gs, ge)
+            if r is not None:
+                results.append(r)
+        results.sort(key=lambda r: r[3] + 0.3 * r[2])
+        return results
+
+    # Level 1: 严格约束（终点≤弹簧圈末端，避开渐变段）
+    if pitch_mode != 'constant':
+        results = scan(lambda gs, ge: ge <= x_coil and (ge <= x_stretch or gs >= x_coil))
+    else:
+        results = scan(lambda gs, ge: ge <= x_coil)
+    if results:
+        b = results[0]
+        return b[0], b[1], b[2], results, 'strict'
+
+    # Level 2: 放宽"避开渐变段"约束（仅渐变模式有意义）
+    if pitch_mode != 'constant':
+        results = scan(lambda gs, ge: ge <= x_coil)
+        if results:
+            b = results[0]
+            return b[0], b[1], b[2], results, 'relaxed_avoid'
+
+    # Level 3: 允许终点略微超过弹簧圈末端
+    overrun = max(glue_length * 0.3, 5.0)
+    results = scan(lambda gs, ge: ge <= x_coil + overrun)
+    if results:
+        b = results[0]
+        return b[0], b[1], b[2], results, 'overrun'
+
+    # Level 4: 任意位置（起点仍然 ≥ search_start）
+    results = scan(lambda gs, ge: True)
+    if results:
+        b = results[0]
+        return b[0], b[1], b[2], results, 'any'
+
+    return None, None, None, [], 'none'
 
 def get_recommended_glue_position(ver, glue_length=10.0):
     name = ver.get('name', '')
@@ -315,9 +355,9 @@ def get_recommended_glue_position(ver, glue_length=10.0):
             max_slope = np.max(dGJ)
         except Exception:
             max_slope = 0.0
-        return fixed_start, fixed_end, max_slope, [(fixed_start, fixed_end, max_slope, max_slope)]
+        return fixed_start, fixed_end, max_slope, [(fixed_start, fixed_end, max_slope, max_slope)], 'fixed'
     else:
-        return find_best_glue_position(ver, glue_length=glue_length, search_start=80.0, search_end=200.0, step=2.0)
+        return find_best_glue_position(ver, glue_length=glue_length, search_start=80.0, step=2.0)
 
 # ==================== 默认数据 ====================
 default_core_v1 = pd.DataFrame([
@@ -675,22 +715,37 @@ else:
                 st.divider()
 
                 # ---------- 3. 自动推荐点胶位置 ----------
-                st.markdown("### 自动推荐点胶位置（离头端≥80mm，终点不超过弹簧圈末端）")
+                st.markdown("### 自动推荐点胶位置")
                 cp = ver.get('complex_params', {})
                 pitch_mode = cp.get('pitch_mode', 'constant')
                 mode_name = {'constant':'恒定螺距','segmented':'分段螺距','gradient':'平滑渐变'}[pitch_mode]
-                st.write(f"弹簧圈螺距模式：**{mode_name}**")
-                st.write(f"弹簧圈末端：**{cp.get('x_coil_end', 120.0):.0f} mm**")
+                st.write(f"弹簧圈螺距模式：**{mode_name}**　|　弹簧圈末端：**{cp.get('x_coil_end', 120.0):.0f} mm**")
 
                 with st.spinner(f"正在确定 {ver['name']} 的推荐点胶位置..."):
-                    best_start, best_end, best_slope, results = get_recommended_glue_position(
+                    best_start, best_end, best_slope, results, status = get_recommended_glue_position(
                         ver, glue_length=glue_length
                     )
 
-                if best_start is None:
-                    st.warning("未找到可行位置（可能搜索范围内无法容纳该点胶长度）。")
+                if status == 'none' or best_start is None:
+                    st.error("无法找到任何可行位置（搜索范围或导丝长度不足）。")
                     st.divider()
                     continue
+
+                # 状态提示
+                status_msgs = {
+                    'strict': ('success', '严格约束满足（终点≤弹簧圈末端，且避开渐变段）'),
+                    'relaxed_avoid': ('warning', '严格约束下无可行位置，已放宽"避开弹簧圈渐变段"约束'),
+                    'overrun': ('warning', '严格约束下无可行位置，点胶终点已略微超过弹簧圈末端'),
+                    'any': ('warning', '约束极紧，已在所有可能位置中选择最优'),
+                    'fixed': ('info', '固定推荐位置（Version 1 + 点胶长度 10 mm）'),
+                }
+                level, msg = status_msgs.get(status, ('info', ''))
+                if level == 'success':
+                    st.success(msg)
+                elif level == 'warning':
+                    st.warning(msg)
+                else:
+                    st.info(msg)
 
                 st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm）")
                 if len(results) > 1:
