@@ -229,10 +229,11 @@ def generate_suggestions(ver):
             break
     return suggestions
 
-# ==================== 自动推荐点胶位置（0.5mm步长，减小最大斜率） ====================
+# ==================== 自动推荐点胶位置（点胶两端斜率之和最小） ====================
 def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=0.5):
     """
-    扫描步长 0.5 mm，以减小扭转刚度最大斜率为目标。
+    评分指标：点胶区起点和终点处的刚度曲线斜率之和 + 0.5 × 局部曲率。
+    只关注点胶区引入的突变，不关注整条曲线的最大斜率。
     """
     x = np.linspace(0, ver['L_total'], 500)
     x_coil = ver.get('spring_end', 120.0)
@@ -254,12 +255,23 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=0.5):
                 complex_params={**ver.get('complex_params', {}), 'eta_glue_peak': 0.90}
             )
             GJ = res[1]
-            dGJ = np.abs(np.diff(GJ) / np.diff(x))
-            max_slope = np.max(dGJ)
-            mask = (x[:-1] >= gs - 5) & (x[:-1] <= ge + 5)
-            local_slope = np.max(dGJ[mask]) if np.any(mask) else max_slope
-            score = max_slope + 0.5 * local_slope
-            return (gs, ge, max_slope, local_slope, score)
+            dGJ = np.diff(GJ) / np.diff(x)         # 一阶导数（斜率）
+            d2GJ = np.diff(dGJ) / np.diff(x[:-1])  # 二阶导数（曲率）
+
+            # 点胶起点处附近的斜率
+            i_s = np.argmin(np.abs(x - gs))
+            i_e = np.argmin(np.abs(x - ge))
+            # 取起点/终点±1个采样点范围内的最大斜率
+            slope_start = np.abs(dGJ[max(0, i_s-1):min(len(dGJ), i_s+2)]).max()
+            slope_end = np.abs(dGJ[max(0, i_e-1):min(len(dGJ), i_e+2)]).max()
+
+            # 点胶区附近的二阶导数最大值（曲率）
+            mask = (x[:-2] >= gs - 3) & (x[:-2] <= ge + 3)
+            max_curv = np.abs(d2GJ[mask]).max() if np.any(mask) else np.abs(d2GJ).max()
+
+            # 评分：点胶两端斜率之和为主，曲率为辅
+            score = slope_start + slope_end + 0.5 * max_curv
+            return (gs, ge, slope_start + slope_end, slope_start, slope_end, max_curv, score)
         except Exception:
             return None
 
@@ -276,7 +288,7 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=0.5):
             r = evaluate(gs, ge)
             if r is not None:
                 results.append(r)
-        results.sort(key=lambda r: r[4])
+        results.sort(key=lambda r: r[6])
         return results
 
     results = scan(lambda gs, ge: ge <= x_coil)
@@ -321,11 +333,15 @@ def get_recommended_glue_position(ver, glue_length=10.0):
                 complex_params={**ver.get('complex_params', {}), 'eta_glue_peak': 0.90}
             )
             GJ = res[1]
-            dGJ = np.abs(np.diff(GJ) / np.diff(x))
-            max_slope = np.max(dGJ)
+            dGJ = np.diff(GJ) / np.diff(x)
+            i_s = np.argmin(np.abs(x - fixed_start))
+            i_e = np.argmin(np.abs(x - fixed_end))
+            slope_start = np.abs(dGJ[max(0, i_s-1):min(len(dGJ), i_s+2)]).max()
+            slope_end = np.abs(dGJ[max(0, i_e-1):min(len(dGJ), i_e+2)]).max()
+            score_val = slope_start + slope_end
         except Exception:
-            max_slope = 0.0
-        return fixed_start, fixed_end, max_slope, [(fixed_start, fixed_end, max_slope, max_slope, 0.0)], 'fixed'
+            score_val = 0.0
+        return fixed_start, fixed_end, score_val, [(fixed_start, fixed_end, score_val, 0, 0, 0, score_val)], 'fixed'
     else:
         return find_best_glue_position(ver, glue_length=glue_length, search_start=80.0, step=0.5)
 
@@ -655,12 +671,12 @@ else:
                 st.pyplot(fig_def)
                 st.divider()
 
-                st.markdown("### 自动推荐点胶位置（目标：减小扭转刚度最大斜率，步长 0.5 mm）")
+                st.markdown("### 自动推荐点胶位置（目标：点胶两端斜率之和最小）")
                 cp = ver.get('complex_params', {})
                 x_coil = ver.get('spring_end', 120.0)
                 st.write(f"弹簧圈末端：**{x_coil:.0f} mm**　|　螺距：**{cp.get('pitch', P_REF):.4f} mm**")
 
-                with st.spinner(f"正在确定 {ver['name']} 的推荐点胶位置（0.5 mm 步长扫描，可能需要几十秒）..."):
+                with st.spinner(f"正在扫描 {ver['name']} 的推荐点胶位置（0.5 mm 步长）..."):
                     best_start, best_end, best_slope, results, status = get_recommended_glue_position(
                         ver, glue_length=glue_length
                     )
@@ -680,12 +696,12 @@ else:
                 elif level == 'warning': st.warning(msg)
                 elif level == 'info': st.info(msg)
 
-                st.markdown(f"**推荐点胶位置：{best_start:.1f} – {best_end:.1f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm）")
+                st.markdown(f"**推荐点胶位置：{best_start:.1f} – {best_end:.1f} mm**（两端斜率之和 {best_slope:.3f} N·mm²/mm）")
                 if len(results) > 1:
-                    st.markdown("**候选排名（前10，按最大斜率最小化）：**")
+                    st.markdown("**候选排名（前10，按两端斜率之和最小）：**")
                     for i, r in enumerate(results[:10]):
-                        gs, ge, ms, ls = r[0], r[1], r[2], r[3]
-                        st.write(f"{i+1}. {gs:.1f}–{ge:.1f} mm，最大斜率 {ms:.3f}，局部斜率 {ls:.3f}")
+                        gs, ge, s_sum, s_start, s_end, curv, sc = r
+                        st.write(f"{i+1}. {gs:.1f}–{ge:.1f} mm，起点斜率 {s_start:.3f}，终点斜率 {s_end:.3f}，合计 {s_sum:.3f}，曲率 {curv:.3f}")
 
                 cp_full = {**cp, 'eta_glue_peak': 0.90}
 
