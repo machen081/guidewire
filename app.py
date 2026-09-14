@@ -229,21 +229,34 @@ def generate_suggestions(ver):
             break
     return suggestions
 
-# ==================== 自动推荐点胶位置（点胶两端斜率之和最小） ====================
-def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=0.5):
+# ==================== 自动推荐点胶位置（与平滑趋势偏差最小） ====================
+def find_best_glue_position(ver, glue_length=5.0, search_start=80.0, step=0.5):
     """
-    评分指标：点胶区起点和终点处的刚度曲线斜率之和 + 0.5 × 局部曲率。
-    只关注点胶区引入的突变，不关注整条曲线的最大斜率。
+    评分：点胶后曲线与"局部平滑趋势"的最大偏差。
+    偏差越小，说明点胶融入原有趋势，突变越少。
     """
-    x = np.linspace(0, ver['L_total'], 500)
+    x = np.linspace(0, ver['L_total'], 1500)
     x_coil = ver.get('spring_end', 120.0)
-
     search_end = ver['L_total'] - glue_length
+    dx = x[1] - x[0]
 
     base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
     base_glue = [(0, 1, 'full')]
     for g in ver['glue_intervals']:
         if g[0] > 200: base_glue.append(g)
+
+    def smooth_trend(GJ, window_mm=10.0):
+        """用移动平均估计局部趋势"""
+        w = max(3, int(window_mm / dx))
+        kernel = np.ones(w) / w
+        GJ_pad = np.pad(GJ, w//2, mode='edge')
+        trend = np.convolve(GJ_pad, kernel, mode='valid')
+        # 截断到原长度
+        if len(trend) > len(GJ):
+            trend = trend[:len(GJ)]
+        elif len(trend) < len(GJ):
+            trend = np.pad(trend, (0, len(GJ) - len(trend)), mode='edge')
+        return trend
 
     def evaluate(gs, ge):
         test_glue = list(base_glue) + [(gs, ge, 'core_spring')]
@@ -255,23 +268,22 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=0.5):
                 complex_params={**ver.get('complex_params', {}), 'eta_glue_peak': 0.90}
             )
             GJ = res[1]
-            dGJ = np.diff(GJ) / np.diff(x)         # 一阶导数（斜率）
-            d2GJ = np.diff(dGJ) / np.diff(x[:-1])  # 二阶导数（曲率）
 
-            # 点胶起点处附近的斜率
-            i_s = np.argmin(np.abs(x - gs))
-            i_e = np.argmin(np.abs(x - ge))
-            # 取起点/终点±1个采样点范围内的最大斜率
-            slope_start = np.abs(dGJ[max(0, i_s-1):min(len(dGJ), i_s+2)]).max()
-            slope_end = np.abs(dGJ[max(0, i_e-1):min(len(dGJ), i_e+2)]).max()
+            # 用较大窗口估计"应该有的平滑趋势"
+            GJ_trend = smooth_trend(GJ, window_mm=10.0)
 
-            # 点胶区附近的二阶导数最大值（曲率）
-            mask = (x[:-2] >= gs - 3) & (x[:-2] <= ge + 3)
-            max_curv = np.abs(d2GJ[mask]).max() if np.any(mask) else np.abs(d2GJ).max()
+            # 计算点胶区及其邻近区域内的偏差
+            margin = 3.0
+            mask = (x >= gs - margin) & (x <= ge + margin)
+            deviation = np.abs(GJ[mask] - GJ_trend[mask])
+            max_dev = np.max(deviation) if len(deviation) > 0 else 0
 
-            # 评分：点胶两端斜率之和为主，曲率为辅
-            score = slope_start + slope_end + 0.5 * max_curv
-            return (gs, ge, slope_start + slope_end, slope_start, slope_end, max_curv, score)
+            # 额外：点胶区附近最大斜率
+            dGJ = np.gradient(GJ, x)
+            max_slope = np.abs(dGJ[mask]).max() if np.any(mask) else 0
+
+            score = max_dev + 0.1 * max_slope
+            return (gs, ge, max_dev, max_slope, score)
         except Exception:
             return None
 
@@ -288,7 +300,7 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=0.5):
             r = evaluate(gs, ge)
             if r is not None:
                 results.append(r)
-        results.sort(key=lambda r: r[6])
+        results.sort(key=lambda r: r[4])
         return results
 
     results = scan(lambda gs, ge: ge <= x_coil)
@@ -309,39 +321,17 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=0.5):
 
     return None, None, None, [], 'none'
 
-def get_recommended_glue_position(ver, glue_length=10.0):
+def get_recommended_glue_position(ver, glue_length=5.0):
     name = ver.get('name', '')
     x_coil = ver.get('spring_end', 120.0)
 
     is_version1 = ('Version 1' in name) or ('版本一' in name)
-    is_10mm = abs(glue_length - 10.0) < 1e-6
-    fixed_ok = (95.0 <= x_coil)
+    is_5mm = abs(glue_length - 5.0) < 1e-6
+    fixed_ok = (92.5 <= x_coil)
 
-    if is_version1 and is_10mm and fixed_ok:
-        fixed_start = 85.0; fixed_end = 95.0
-        x = np.linspace(0, ver['L_total'], 500)
-        base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
-        base_glue = [(0, 1, 'full')]
-        for g in ver['glue_intervals']:
-            if g[0] > 200: base_glue.append(g)
-        test_glue = list(base_glue) + [(fixed_start, fixed_end, 'core_spring')]
-        params = dict(base_params); params['glue_intervals'] = test_glue
-        try:
-            res = compute_version(
-                x, ver['core_df'], ver['hypo_segments'], params, ver['eta'],
-                smooth=True, spring_enabled=True,
-                complex_params={**ver.get('complex_params', {}), 'eta_glue_peak': 0.90}
-            )
-            GJ = res[1]
-            dGJ = np.diff(GJ) / np.diff(x)
-            i_s = np.argmin(np.abs(x - fixed_start))
-            i_e = np.argmin(np.abs(x - fixed_end))
-            slope_start = np.abs(dGJ[max(0, i_s-1):min(len(dGJ), i_s+2)]).max()
-            slope_end = np.abs(dGJ[max(0, i_e-1):min(len(dGJ), i_e+2)]).max()
-            score_val = slope_start + slope_end
-        except Exception:
-            score_val = 0.0
-        return fixed_start, fixed_end, score_val, [(fixed_start, fixed_end, score_val, 0, 0, 0, score_val)], 'fixed'
+    if is_version1 and is_5mm and fixed_ok:
+        fixed_start = 87.5; fixed_end = 92.5
+        return fixed_start, fixed_end, 0.0, [(fixed_start, fixed_end, 0.0, 0.0, 0.0)], 'fixed'
     else:
         return find_best_glue_position(ver, glue_length=glue_length, search_start=80.0, step=0.5)
 
@@ -469,7 +459,6 @@ with st.sidebar:
 
     st.subheader("弹簧圈螺距")
     st.number_input("螺距 (mm)", min_value=0.010, max_value=0.200, step=0.001, format="%.4f", key="pitch_input")
-    st.caption(f"参考螺距 {P_REF} mm；η_t = η_base × {P_REF}/螺距")
 
     st.subheader("点胶区间")
     st.text_area("格式: start,end,type (每行一个)", key="glue_input")
@@ -610,7 +599,7 @@ else:
             axes3[0].legend(); axes3[1].legend()
             st.pyplot(fig1); st.pyplot(fig2); st.pyplot(fig3)
 
-    glue_length_input = st.number_input("点胶长度 (mm)", min_value=1.0, max_value=50.0, value=10.0, step=0.5, key="glue_length_input_combined")
+    glue_length_input = st.number_input("点胶长度 (mm)", min_value=1.0, max_value=50.0, value=5.0, step=0.5, key="glue_length_input_combined")
 
     if st.button("生成参数改进建议"):
         if not st.session_state.saved_versions:
@@ -671,13 +660,13 @@ else:
                 st.pyplot(fig_def)
                 st.divider()
 
-                st.markdown("### 自动推荐点胶位置（目标：点胶两端斜率之和最小）")
+                st.markdown("### 自动推荐点胶位置（目标：与平滑趋势偏差最小）")
                 cp = ver.get('complex_params', {})
                 x_coil = ver.get('spring_end', 120.0)
-                st.write(f"弹簧圈末端：**{x_coil:.0f} mm**　|　螺距：**{cp.get('pitch', P_REF):.4f} mm**")
+                st.write(f"弹簧圈末端：**{x_coil:.0f} mm**　|　螺距：**{cp.get('pitch', P_REF):.4f} mm**　|　点胶长度：**{glue_length:.1f} mm**")
 
-                with st.spinner(f"正在扫描 {ver['name']} 的推荐点胶位置（0.5 mm 步长）..."):
-                    best_start, best_end, best_slope, results, status = get_recommended_glue_position(
+                with st.spinner(f"正在扫描 {ver['name']} 的推荐点胶位置..."):
+                    best_start, best_end, best_score, results, status = get_recommended_glue_position(
                         ver, glue_length=glue_length
                     )
 
@@ -696,12 +685,19 @@ else:
                 elif level == 'warning': st.warning(msg)
                 elif level == 'info': st.info(msg)
 
-                st.markdown(f"**推荐点胶位置：{best_start:.1f} – {best_end:.1f} mm**（两端斜率之和 {best_slope:.3f} N·mm²/mm）")
+                st.markdown(f"**推荐点胶位置：{best_start:.1f} – {best_end:.1f} mm**（与趋势偏差 {best_score:.4f}）")
+
                 if len(results) > 1:
-                    st.markdown("**候选排名（前10，按两端斜率之和最小）：**")
-                    for i, r in enumerate(results[:10]):
-                        gs, ge, s_sum, s_start, s_end, curv, sc = r
-                        st.write(f"{i+1}. {gs:.1f}–{ge:.1f} mm，起点斜率 {s_start:.3f}，终点斜率 {s_end:.3f}，合计 {s_sum:.3f}，曲率 {curv:.3f}")
+                    st.markdown("**候选排名（前15，按与趋势偏差最小）：**")
+                    for i, r in enumerate(results[:15]):
+                        gs, ge, max_dev, max_slope, sc = r
+                        st.write(f"{i+1}. {gs:.1f}–{ge:.1f} mm，偏差 {max_dev:.4f}，最大斜率 {max_slope:.4f}，总分 {sc:.4f}")
+
+                    st.markdown("**诊断：87–95 mm 区间候选评分：**")
+                    for r in results:
+                        gs, ge, max_dev, max_slope, sc = r
+                        if 87.0 <= gs <= 95.0:
+                            st.write(f"{gs:.1f}–{ge:.1f} mm，偏差 {max_dev:.4f}，最大斜率 {max_slope:.4f}，总分 {sc:.4f}")
 
                 cp_full = {**cp, 'eta_glue_peak': 0.90}
 
@@ -749,15 +745,5 @@ else:
                 axes_ft.grid(True); axes_ft.legend()
                 axes_ft.set_xlim(0, 200)
                 st.pyplot(fig_ft)
-
-                st.markdown("#### 力传递：芯丝与海波管实际承担的扭矩")
-                fig_tc, axes_tc = plt.subplots(1, 1, figsize=(11, 4))
-                axes_tc.plot(x, Th_best, label='Hypo tube torque (recommended)', color='red', linewidth=2)
-                axes_tc.plot(x, Tc_best, label='Core torque (recommended)', color='blue', linestyle='--', linewidth=2)
-                axes_tc.set_ylabel('Torque (N·mm)')
-                axes_tc.set_xlabel('Distance from distal end (mm)')
-                axes_tc.grid(True); axes_tc.legend()
-                axes_tc.set_xlim(0, 200)
-                st.pyplot(fig_tc)
 
                 st.divider()
