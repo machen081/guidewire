@@ -266,7 +266,7 @@ def generate_suggestions(ver):
     })
     return suggestions
 
-# ==================== 自动推荐点胶位置（搜索起点80mm） ====================
+# ==================== 自动推荐点胶位置 ====================
 def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, search_end=200.0, step=2.0):
     x = np.linspace(0, ver['L_total'], 500)
     cp = ver.get('complex_params', {})
@@ -305,6 +305,40 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, search_end
     results.sort(key=lambda r: r[3] + 0.3 * r[2])
     best = results[0]
     return best[0], best[1], best[2], results
+
+# ==================== 固定推荐位置（针对 Version 1） ====================
+def get_recommended_glue_position(ver, glue_length=10.0):
+    """
+    如果版本名称包含 'Version 1' 或 '版本一'，推荐位置固定为 85–95 mm；
+    否则使用自动搜索（起点 80 mm）。
+    """
+    name = ver.get('name', '')
+    if 'Version 1' in name or '版本一' in name:
+        # 固定推荐 85-95 mm
+        fixed_start = 85.0
+        fixed_end = 95.0
+        # 计算该位置的斜率用于显示
+        x = np.linspace(0, ver['L_total'], 500)
+        cp = ver.get('complex_params', {})
+        base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
+        base_glue = [(0, 1, 'full')]
+        for g in ver['glue_intervals']:
+            if g[0] > 200: base_glue.append(g)
+        test_glue = list(base_glue) + [(fixed_start, fixed_end, 'core_spring')]
+        params = dict(base_params); params['glue_intervals'] = test_glue
+        try:
+            _, GJ, _, _, _, _, _, _ = compute_version(
+                x, ver['core_df'], ver['hypo_segments'], params, ver['eta'],
+                smooth=True, spring_enabled=True,
+                complex_params={**cp, 'eta_glue_peak': 0.90}
+            )
+            dGJ = np.abs(np.diff(GJ) / np.diff(x))
+            max_slope = np.max(dGJ)
+        except Exception:
+            max_slope = 0.0
+        return fixed_start, fixed_end, max_slope, [(fixed_start, fixed_end, max_slope, max_slope)]
+    else:
+        return find_best_glue_position(ver, glue_length=glue_length, search_start=80.0, search_end=200.0, step=2.0)
 
 # ==================== 默认数据 ====================
 default_core_v1 = pd.DataFrame([
@@ -613,7 +647,7 @@ else:
             st.markdown("""
             - **原版（蓝色）**：原始点胶位置、弹簧圈螺距模式
             - **平滑版（橙色虚线）**：海波管 Hermite 平滑 + 芯丝 S 形过渡，其他参数不变
-            - **优化版（绿色点划线）**：平滑 + 弹簧圈螺距模式 + 自动推荐点胶位置（离头端≥80mm）
+            - **优化版（绿色点划线）**：平滑 + 弹簧圈螺距模式 + 推荐点胶位置
             """)
 
             glue_length = glue_length_1
@@ -641,9 +675,9 @@ else:
                     x, ver['core_df'], ver['hypo_segments'], params_smooth, ver['eta'],
                     smooth=True, spring_enabled=False)
 
-                with st.spinner(f"正在扫描 {ver['name']} 的最优点胶位置（≥80mm）..."):
-                    best_start, best_end, best_slope, results = find_best_glue_position(
-                        ver, glue_length=glue_length, search_start=80.0, search_end=200.0, step=2.0
+                with st.spinner(f"正在确定 {ver['name']} 的推荐点胶位置..."):
+                    best_start, best_end, best_slope, results = get_recommended_glue_position(
+                        ver, glue_length=glue_length
                     )
 
                 if best_start is None:
@@ -661,7 +695,12 @@ else:
                     x, ver['core_df'], ver['hypo_segments'], params_opt, ver['eta'],
                     smooth=True, spring_enabled=True, complex_params=cp_full)
 
-                st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm，离头端≥80mm）")
+                # 判断是否固定位置
+                name = ver.get('name', '')
+                if 'Version 1' in name or '版本一' in name:
+                    st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（Version 1 固定推荐位置）")
+                else:
+                    st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm，离头端≥80mm）")
 
                 fig_stiff, axes_stiff = plt.subplots(3, 1, figsize=(11, 12))
                 axes_stiff[0].plot(x, EI_o, label='Original', color='blue', linewidth=2)
@@ -728,6 +767,7 @@ else:
             st.warning("请先保存版本")
         else:
             st.markdown("### 自动扫描点胶位置并推荐最优方案（离头端≥80mm）")
+            st.markdown("**Version 1 (Step) 固定推荐 85–95 mm**，其他版本自动搜索。")
             glue_length = glue_length_2
 
             for ver in st.session_state.saved_versions:
@@ -737,20 +777,24 @@ else:
                 mode_name = {'constant':'恒定螺距','segmented':'分段螺距','gradient':'平滑渐变'}[pitch_mode]
                 st.write(f"弹簧圈螺距模式：**{mode_name}**")
 
-                with st.spinner(f"正在扫描 {ver['name']} 的点胶位置（≥80mm）..."):
-                    best_start, best_end, best_slope, results = find_best_glue_position(
-                        ver, glue_length=glue_length, search_start=80.0, search_end=200.0, step=2.0
+                with st.spinner(f"正在确定 {ver['name']} 的推荐点胶位置..."):
+                    best_start, best_end, best_slope, results = get_recommended_glue_position(
+                        ver, glue_length=glue_length
                     )
 
                 if best_start is None:
-                    st.warning("未找到可行位置（离头端≥80mm范围内无可用区间）。")
+                    st.warning("未找到可行位置。")
                     continue
 
-                st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm）")
-                if len(results) > 1:
-                    st.markdown("**候选排名（前5）：**")
-                    for i, (gs, ge, ms, ls) in enumerate(results[:5]):
-                        st.write(f"{i+1}. {gs:.0f}–{ge:.0f} mm，局部斜率 {ls:.3f}，全局斜率 {ms:.3f}")
+                name = ver.get('name', '')
+                if 'Version 1' in name or '版本一' in name:
+                    st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（Version 1 固定推荐位置 85–95 mm）")
+                else:
+                    st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm）")
+                    if len(results) > 1:
+                        st.markdown("**候选排名（前5）：**")
+                        for i, (gs, ge, ms, ls) in enumerate(results[:5]):
+                            st.write(f"{i+1}. {gs:.0f}–{ge:.0f} mm，局部斜率 {ls:.3f}，全局斜率 {ms:.3f}")
 
                 x = np.linspace(0, ver['L_total'], 500)
                 base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
