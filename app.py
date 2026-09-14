@@ -266,8 +266,8 @@ def generate_suggestions(ver):
     })
     return suggestions
 
-# ==================== 自动推荐点胶位置 ====================
-def find_best_glue_position(ver, glue_length=10.0, search_start=20.0, search_end=200.0, step=2.0):
+# ==================== 自动推荐点胶位置（搜索起点80mm） ====================
+def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, search_end=200.0, step=2.0):
     x = np.linspace(0, ver['L_total'], 500)
     cp = ver.get('complex_params', {})
     x_stretch = cp.get('x_stretch_start', 80.0)
@@ -593,7 +593,8 @@ else:
             axes3[0].legend(); axes3[1].legend()
             st.pyplot(fig1); st.pyplot(fig2); st.pyplot(fig3)
 
-    # ========== 生成参数改进建议 + 三种方案对比 ==========
+    # ========== 生成参数改进建议 ==========
+    glue_length_1 = st.number_input("优化版点胶长度 (mm)", min_value=1.0, max_value=50.0, value=10.0, step=0.5, key="glue_length_input_1")
     if st.button("生成参数改进建议"):
         if not st.session_state.saved_versions:
             st.warning("请先保存版本")
@@ -612,10 +613,10 @@ else:
             st.markdown("""
             - **原版（蓝色）**：原始点胶位置、弹簧圈螺距模式
             - **平滑版（橙色虚线）**：海波管 Hermite 平滑 + 芯丝 S 形过渡，其他参数不变
-            - **优化版（绿色点划线）**：平滑 + 弹簧圈螺距模式 + 自动推荐点胶位置
+            - **优化版（绿色点划线）**：平滑 + 弹簧圈螺距模式 + 自动推荐点胶位置（离头端≥80mm）
             """)
 
-            glue_length = st.number_input("优化版点胶长度 (mm)", min_value=1.0, max_value=50.0, value=10.0, step=0.5, key="glue_length_input")
+            glue_length = glue_length_1
 
             for ver in st.session_state.saved_versions:
                 st.subheader(f"对比：{ver['name']}")
@@ -628,29 +629,26 @@ else:
 
                 base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
 
-                # 1. 原版
                 params_orig = dict(base_params)
                 params_orig['glue_intervals'] = ver['glue_intervals']
                 EI_o, GJ_o, EA_o, sb_o, tt_o, se_o, y_o, phi_o = compute_version(
                     x, ver['core_df'], ver['hypo_segments'], params_orig, ver['eta'],
                     smooth=False, spring_enabled=False)
 
-                # 2. 平滑版
                 params_smooth = dict(base_params)
                 params_smooth['glue_intervals'] = ver['glue_intervals']
                 EI_s, GJ_s, EA_s, sb_s, tt_s, se_s, y_s, phi_s = compute_version(
                     x, ver['core_df'], ver['hypo_segments'], params_smooth, ver['eta'],
                     smooth=True, spring_enabled=False)
 
-                # 3. 优化版
-                with st.spinner(f"正在扫描 {ver['name']} 的最优点胶位置..."):
+                with st.spinner(f"正在扫描 {ver['name']} 的最优点胶位置（≥80mm）..."):
                     best_start, best_end, best_slope, results = find_best_glue_position(
-                        ver, glue_length=glue_length, search_start=20.0, search_end=200.0, step=2.0
+                        ver, glue_length=glue_length, search_start=80.0, search_end=200.0, step=2.0
                     )
 
                 if best_start is None:
                     st.warning("未找到可行位置，使用原点胶位置。")
-                    best_start, best_end = 70.0, 80.0
+                    best_start, best_end = 80.0, 90.0
 
                 glue_opt = [(0, 1, 'full')]
                 for g in ver['glue_intervals']:
@@ -663,7 +661,7 @@ else:
                     x, ver['core_df'], ver['hypo_segments'], params_opt, ver['eta'],
                     smooth=True, spring_enabled=True, complex_params=cp_full)
 
-                st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm）")
+                st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm，离头端≥80mm）")
 
                 fig_stiff, axes_stiff = plt.subplots(3, 1, figsize=(11, 12))
                 axes_stiff[0].plot(x, EI_o, label='Original', color='blue', linewidth=2)
@@ -723,13 +721,14 @@ else:
                 st.pyplot(fig_eta)
                 st.divider()
 
-    # ========== 自动推荐点胶位置 ==========
+    # ========== 自动推荐最优方案 ==========
+    glue_length_2 = st.number_input("点胶长度 (mm)", min_value=1.0, max_value=50.0, value=10.0, step=0.5, key="glue_length_input_2")
     if st.button("自动推荐最优方案"):
         if not st.session_state.saved_versions:
             st.warning("请先保存版本")
         else:
-            st.markdown("### 自动扫描点胶位置并推荐最优方案")
-            glue_length = st.number_input("点胶长度 (mm)", min_value=1.0, max_value=50.0, value=10.0, step=0.5, key="glue_length_input_2")
+            st.markdown("### 自动扫描点胶位置并推荐最优方案（离头端≥80mm）")
+            glue_length = glue_length_2
 
             for ver in st.session_state.saved_versions:
                 st.subheader(ver['name'])
@@ -738,13 +737,13 @@ else:
                 mode_name = {'constant':'恒定螺距','segmented':'分段螺距','gradient':'平滑渐变'}[pitch_mode]
                 st.write(f"弹簧圈螺距模式：**{mode_name}**")
 
-                with st.spinner(f"正在扫描 {ver['name']} 的点胶位置..."):
+                with st.spinner(f"正在扫描 {ver['name']} 的点胶位置（≥80mm）..."):
                     best_start, best_end, best_slope, results = find_best_glue_position(
-                        ver, glue_length=glue_length, search_start=20.0, search_end=200.0, step=2.0
+                        ver, glue_length=glue_length, search_start=80.0, search_end=200.0, step=2.0
                     )
 
                 if best_start is None:
-                    st.warning("未找到可行位置。")
+                    st.warning("未找到可行位置（离头端≥80mm范围内无可用区间）。")
                     continue
 
                 st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm）")
