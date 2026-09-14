@@ -284,8 +284,15 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, search_end
     return best[0], best[1], best[2], results
 
 def get_recommended_glue_position(ver, glue_length=10.0):
+    """
+    仅当点胶长度为 10 mm 且版本为 Version 1 时，固定推荐 85-95 mm；
+    否则走正常的自动搜索。
+    """
     name = ver.get('name', '')
-    if 'Version 1' in name or '版本一' in name:
+    is_version1 = ('Version 1' in name) or ('版本一' in name)
+    is_10mm = abs(glue_length - 10.0) < 1e-6
+
+    if is_version1 and is_10mm:
         fixed_start = 85.0; fixed_end = 95.0
         x = np.linspace(0, ver['L_total'], 500)
         cp = ver.get('complex_params', {})
@@ -669,7 +676,6 @@ else:
             st.warning("请先保存版本")
         else:
             st.markdown("### 自动扫描点胶位置并推荐最优方案（离头端≥80mm）")
-            st.markdown("**Version 1 (Step) 固定推荐 85–95 mm**，其他版本自动搜索。")
             glue_length = glue_length_2
 
             for ver in st.session_state.saved_versions:
@@ -688,15 +694,11 @@ else:
                     st.warning("未找到可行位置。")
                     continue
 
-                name = ver.get('name', '')
-                if 'Version 1' in name or '版本一' in name:
-                    st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**")
-                else:
-                    st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm）")
-                    if len(results) > 1:
-                        st.markdown("**候选排名（前5）：**")
-                        for i, (gs, ge, ms, ls) in enumerate(results[:5]):
-                            st.write(f"{i+1}. {gs:.0f}–{ge:.0f} mm，局部斜率 {ls:.3f}，全局斜率 {ms:.3f}")
+                st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm）")
+                if len(results) > 1:
+                    st.markdown("**候选排名（前5）：**")
+                    for i, (gs, ge, ms, ls) in enumerate(results[:5]):
+                        st.write(f"{i+1}. {gs:.0f}–{ge:.0f} mm，局部斜率 {ls:.3f}，全局斜率 {ms:.3f}")
 
                 x = np.linspace(0, ver['L_total'], 500)
                 base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
