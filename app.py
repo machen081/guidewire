@@ -207,7 +207,7 @@ def compute_version(x, core_df, hypo_segments, params, eta_global,
 
     return (EI_total, GJ_total, EA_total, sigma_bend, tau_tors, sigma_eq, y_def, phi)
 
-# ==================== 参数改进建议（仅海波管+芯丝） ====================
+# ==================== 参数改进建议 ====================
 def generate_suggestions(ver):
     suggestions = []
     hypo_segments = ver['hypo_segments']
@@ -251,14 +251,18 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, search_end
     x_coil = cp.get('x_coil_end', 120.0)
     pitch_mode = cp.get('pitch_mode', 'constant')
 
+    effective_search_end = min(search_end, x_coil)
+
     base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
     base_glue = [(0, 1, 'full')]
     for g in ver['glue_intervals']:
         if g[0] > 200: base_glue.append(g)
 
     results = []
-    for gs in np.arange(search_start, search_end - glue_length, step):
+    for gs in np.arange(search_start, effective_search_end - glue_length, step):
         ge = gs + glue_length
+        if ge > x_coil:
+            continue
         if pitch_mode != 'constant':
             if not (ge <= x_stretch or gs >= x_coil):
                 continue
@@ -284,18 +288,17 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, search_end
     return best[0], best[1], best[2], results
 
 def get_recommended_glue_position(ver, glue_length=10.0):
-    """
-    仅当点胶长度为 10 mm 且版本为 Version 1 时，固定推荐 85-95 mm；
-    否则走正常的自动搜索。
-    """
     name = ver.get('name', '')
+    cp = ver.get('complex_params', {})
+    x_coil = cp.get('x_coil_end', 120.0)
+
     is_version1 = ('Version 1' in name) or ('版本一' in name)
     is_10mm = abs(glue_length - 10.0) < 1e-6
+    fixed_ok = (95.0 <= x_coil)
 
-    if is_version1 and is_10mm:
+    if is_version1 and is_10mm and fixed_ok:
         fixed_start = 85.0; fixed_end = 95.0
         x = np.linspace(0, ver['L_total'], 500)
-        cp = ver.get('complex_params', {})
         base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
         base_glue = [(0, 1, 'full')]
         for g in ver['glue_intervals']:
@@ -603,13 +606,20 @@ else:
             axes3[0].legend(); axes3[1].legend()
             st.pyplot(fig1); st.pyplot(fig2); st.pyplot(fig3)
 
-    # ========== 生成参数改进建议（只涉及海波管+芯丝） ==========
+    # ========== 生成参数改进建议（含自动推荐点胶位置） ==========
+    glue_length_input = st.number_input("点胶长度 (mm)", min_value=1.0, max_value=50.0, value=10.0, step=0.5, key="glue_length_input_combined")
+
     if st.button("生成参数改进建议"):
         if not st.session_state.saved_versions:
             st.warning("请先保存版本")
         else:
+            glue_length = glue_length_input
+
             for ver in st.session_state.saved_versions:
-                st.subheader(f"版本：{ver['name']}")
+                st.markdown(f"## 版本：{ver['name']}")
+
+                # ---------- 1. 改进建议 ----------
+                st.markdown("### 改进建议（海波管 + 芯丝）")
                 suggestions = generate_suggestions(ver)
                 for s in suggestions:
                     st.markdown(f"**{s['type']}** (位置: {s['position']})")
@@ -617,15 +627,12 @@ else:
                     st.markdown(f"```\n{s['formula']}\n```")
                 st.divider()
 
-            st.markdown("---")
-            st.markdown("### 原版 vs 平滑改进（仅海波管 + 芯丝）")
-            st.markdown("""
-            - **原版（蓝色）**：原始海波管分段和芯丝直径过渡
-            - **平滑版（橙色虚线）**：海波管 Hermite 平滑 + 芯丝 S 形过渡
-            """)
-
-            for ver in st.session_state.saved_versions:
-                st.subheader(f"对比：{ver['name']}")
+                # ---------- 2. 原版 vs 平滑版对比 ----------
+                st.markdown("### 原版 vs 平滑改进（仅海波管 + 芯丝）")
+                st.markdown("""
+                - **原版（蓝色）**：原始海波管分段和芯丝直径过渡
+                - **平滑版（橙色虚线）**：海波管 Hermite 平滑 + 芯丝 S 形过渡
+                """)
                 x = np.linspace(0, ver['L_total'], 500)
                 base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
 
@@ -646,12 +653,10 @@ else:
                 axes_stiff[0].plot(x, EI_s, label='Smooth (hypo+core)', color='orange', linestyle='--', linewidth=2)
                 axes_stiff[0].set_ylabel('Bending stiffness EI (N·mm²)'); axes_stiff[0].grid(True); axes_stiff[0].legend()
                 axes_stiff[0].set_title(f"{ver['name']} - Bending stiffness")
-
                 axes_stiff[1].plot(x, GJ_o, label='Original', color='blue', linewidth=2)
                 axes_stiff[1].plot(x, GJ_s, label='Smooth (hypo+core)', color='orange', linestyle='--', linewidth=2)
                 axes_stiff[1].set_ylabel('Torsional stiffness GJ (N·mm²)'); axes_stiff[1].grid(True); axes_stiff[1].legend()
                 axes_stiff[1].set_xlim(0, 200)
-
                 axes_stiff[2].plot(x, EA_o, label='Original', color='blue', linewidth=2)
                 axes_stiff[2].plot(x, EA_s, label='Smooth (hypo+core)', color='orange', linestyle='--', linewidth=2)
                 axes_stiff[2].set_ylabel('Axial stiffness EA (N)'); axes_stiff[2].set_xlabel('Distance from distal end (mm)')
@@ -669,21 +674,13 @@ else:
                 st.pyplot(fig_def)
                 st.divider()
 
-    # ========== 自动推荐最优方案 ==========
-    glue_length_2 = st.number_input("点胶长度 (mm)", min_value=1.0, max_value=50.0, value=10.0, step=0.5, key="glue_length_input_2")
-    if st.button("自动推荐最优方案"):
-        if not st.session_state.saved_versions:
-            st.warning("请先保存版本")
-        else:
-            st.markdown("### 自动扫描点胶位置并推荐最优方案（离头端≥80mm）")
-            glue_length = glue_length_2
-
-            for ver in st.session_state.saved_versions:
-                st.subheader(ver['name'])
+                # ---------- 3. 自动推荐点胶位置 ----------
+                st.markdown("### 自动推荐点胶位置（离头端≥80mm，终点不超过弹簧圈末端）")
                 cp = ver.get('complex_params', {})
                 pitch_mode = cp.get('pitch_mode', 'constant')
                 mode_name = {'constant':'恒定螺距','segmented':'分段螺距','gradient':'平滑渐变'}[pitch_mode]
                 st.write(f"弹簧圈螺距模式：**{mode_name}**")
+                st.write(f"弹簧圈末端：**{cp.get('x_coil_end', 120.0):.0f} mm**")
 
                 with st.spinner(f"正在确定 {ver['name']} 的推荐点胶位置..."):
                     best_start, best_end, best_slope, results = get_recommended_glue_position(
@@ -691,7 +688,8 @@ else:
                     )
 
                 if best_start is None:
-                    st.warning("未找到可行位置。")
+                    st.warning("未找到可行位置（可能搜索范围内无法容纳该点胶长度）。")
+                    st.divider()
                     continue
 
                 st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm）")
@@ -700,8 +698,7 @@ else:
                     for i, (gs, ge, ms, ls) in enumerate(results[:5]):
                         st.write(f"{i+1}. {gs:.0f}–{ge:.0f} mm，局部斜率 {ls:.3f}，全局斜率 {ms:.3f}")
 
-                x = np.linspace(0, ver['L_total'], 500)
-                base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
+                # ---------- 4. 原版 vs 推荐版对比 ----------
                 cp_full = {**cp, 'eta_glue_peak': 0.90}
 
                 base_glue_orig = [(0, 1, 'full')]
@@ -709,9 +706,9 @@ else:
                     if g[0] > 1 and g[0] <= 200: base_glue_orig.append(g)
                 for g in ver['glue_intervals']:
                     if g[0] > 200: base_glue_orig.append(g)
-                params_orig = dict(base_params); params_orig['glue_intervals'] = base_glue_orig
+                params_orig2 = dict(base_params); params_orig2['glue_intervals'] = base_glue_orig
                 _, GJ_orig, _, _, _, _, y_orig, phi_orig = compute_version(
-                    x, ver['core_df'], ver['hypo_segments'], params_orig, ver['eta'],
+                    x, ver['core_df'], ver['hypo_segments'], params_orig2, ver['eta'],
                     smooth=True, spring_enabled=True, complex_params=cp_full)
 
                 base_glue_best = [(0, 1, 'full')]
