@@ -229,7 +229,7 @@ def generate_suggestions(ver):
             break
     return suggestions
 
-# ==================== 自动推荐点胶位置（只关注扭转刚度突变） ====================
+# ==================== 自动推荐点胶位置（只关注最大斜率最小化） ====================
 def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=2.0):
     x = np.linspace(0, ver['L_total'], 500)
     x_coil = ver.get('spring_end', 120.0)
@@ -251,18 +251,16 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=2.0):
                 complex_params={**ver.get('complex_params', {}), 'eta_glue_peak': 0.90}
             )
             GJ = res[1]
-            # 一阶导数：斜率（刚度变化率）
+            # 一阶导数：刚度曲线的斜率
             dGJ = np.abs(np.diff(GJ) / np.diff(x))
-            # 二阶导数：斜率变化率（突变）
-            d2GJ = np.abs(np.diff(dGJ) / np.diff(x[:-1]))
+            # 最大斜率：全局最大
             max_slope = np.max(dGJ)
-            # 关注点胶区域附近的突变（局部二阶导数最大）
-            mask = (x[:-2] >= gs - 5) & (x[:-2] <= ge + 5)
-            local_d2 = np.max(d2GJ[mask]) if np.any(mask) else np.max(d2GJ)
-            local_slope = np.max(dGJ[:-1][mask]) if np.any(mask) else max_slope
-            # 评分：以局部突变（二阶导数）为主，全局斜率变化为辅
-            score = local_d2 + 0.1 * local_slope + 0.05 * max_slope
-            return (gs, ge, max_slope, local_slope, score, local_d2)
+            # 点胶区域附近的最大斜率
+            mask = (x[:-1] >= gs - 5) & (x[:-1] <= ge + 5)
+            local_slope = np.max(dGJ[mask]) if np.any(mask) else max_slope
+            # 评分：全局最大斜率为主，局部斜率为辅
+            score = max_slope + 0.5 * local_slope
+            return (gs, ge, max_slope, local_slope, score)
         except Exception:
             return None
 
@@ -328,7 +326,7 @@ def get_recommended_glue_position(ver, glue_length=10.0):
             max_slope = np.max(dGJ)
         except Exception:
             max_slope = 0.0
-        return fixed_start, fixed_end, max_slope, [(fixed_start, fixed_end, max_slope, max_slope, 0.0, 0.0)], 'fixed'
+        return fixed_start, fixed_end, max_slope, [(fixed_start, fixed_end, max_slope, max_slope, 0.0)], 'fixed'
     else:
         return find_best_glue_position(ver, glue_length=glue_length, search_start=80.0, step=2.0)
 
@@ -658,7 +656,7 @@ else:
                 st.pyplot(fig_def)
                 st.divider()
 
-                st.markdown("### 自动推荐点胶位置（目标：减小扭转刚度突变）")
+                st.markdown("### 自动推荐点胶位置（目标：减小扭转刚度最大斜率）")
                 cp = ver.get('complex_params', {})
                 x_coil = ver.get('spring_end', 120.0)
                 st.write(f"弹簧圈末端：**{x_coil:.0f} mm**　|　螺距：**{cp.get('pitch', P_REF):.4f} mm**")
@@ -685,7 +683,7 @@ else:
 
                 st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm）")
                 if len(results) > 1:
-                    st.markdown("**候选排名（前5，按突变最小化）：**")
+                    st.markdown("**候选排名（前5，按最大斜率最小化）：**")
                     for i, r in enumerate(results[:5]):
                         gs, ge, ms, ls = r[0], r[1], r[2], r[3]
                         st.write(f"{i+1}. {gs:.0f}–{ge:.0f} mm，最大斜率 {ms:.3f}，局部斜率 {ls:.3f}")
