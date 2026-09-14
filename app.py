@@ -92,31 +92,11 @@ def interp_core(x_val, core_df, smooth=False):
     if x_val < core_df.iloc[0]['start']: return core_df.iloc[0]['d_start']
     return core_df.iloc[-1]['d_end']
 
-# ==================== 弹簧圈螺距模型 ====================
-def get_pitch(x, x_stretch_start, x_coil_end, p_start, p_end, pitch_mode='constant', n_segments=3):
-    if x < x_stretch_start or x > x_coil_end:
-        return p_start
-    if pitch_mode == 'constant':
-        return p_start
-    elif pitch_mode == 'segmented':
-        seg_len = (x_coil_end - x_stretch_start) / n_segments
-        idx = int((x - x_stretch_start) / seg_len)
-        idx = min(idx, n_segments - 1)
-        return p_start + (p_end - p_start) * (idx + 1) / n_segments
-    else:
-        t = (x - x_stretch_start) / (x_coil_end - x_stretch_start)
-        return p_start + (p_end - p_start) * t
-
-def eta_t_spring(x, glue_intervals, x_stretch_start, x_coil_end, p_start, p_end,
-                 eta_base, eta_glue_peak, pitch_mode='constant', n_segments=3):
-    """传递效率 η_t：物理上是界面耦合强度与参考耦合强度之比。
-    螺距越大 → 圈数越少 → 弹簧圈与海波管接触越松 → 耦合越弱 → η_t 越小。"""
+# ==================== 恒定螺距传递系数 ====================
+def eta_t_constant(x, glue_intervals, eta_base, eta_glue_peak):
+    """恒定螺距：弹簧圈段传递系数恒定，点胶区覆盖为峰值"""
     if x <= 1: return 1.0
-    if x <= x_stretch_start or x > x_coil_end:
-        base = eta_base
-    else:
-        p = get_pitch(x, x_stretch_start, x_coil_end, p_start, p_end, pitch_mode, n_segments)
-        base = eta_base * p_start / p
+    base = eta_base
     for g_start, g_end, g_type in glue_intervals:
         if g_start <= x < g_end:
             return eta_glue_peak
@@ -158,13 +138,10 @@ def compute_version(x, core_df, hypo_segments, params, eta_global,
                 elif g_type == 'core_hypo': eta_b = eta_global['core_hypo_b']; eta_a = eta_global['core_hypo_a']
                 break
 
+        # 恒定螺距传递系数
         if spring_enabled and complex_params:
-            eta_t = eta_t_spring(xi, glue_intervals,
-                complex_params['x_stretch_start'], complex_params['x_coil_end'],
-                complex_params['p_start'], complex_params['p_end'],
-                eta_global['spring_t'], complex_params['eta_glue_peak'],
-                complex_params.get('pitch_mode', 'constant'),
-                complex_params.get('n_segments', 3))
+            eta_t = eta_t_constant(xi, glue_intervals,
+                eta_global['spring_t'], complex_params['eta_glue_peak'])
         else:
             eta_t = eta_global['no_spring_t']
             if spring_start <= xi < spring_end: eta_t = eta_global['spring_t']
@@ -193,11 +170,11 @@ def compute_version(x, core_df, hypo_segments, params, eta_global,
 
     M_total = F*x; T_total = T0*x/L_total
     ratio_b = (eta_b_arr*EI_hypo)/(EI_core + eta_b_arr*EI_hypo)
-    # 关键：扭矩分配比例（力传递），由传递效率 η_t 决定
+    # 扭矩分配比例（力传递）
     ratio_t = (eta_t_arr*GJ_hypo)/(GJ_core + eta_t_arr*GJ_hypo)
     M_hypo = ratio_b*M_total
-    T_hypo = ratio_t*T_total  # 海波管承担的扭矩
-    T_core = T_total - T_hypo # 芯丝承担的扭矩
+    T_hypo = ratio_t*T_total
+    T_core = T_total - T_hypo
 
     t_wall = (D_o - D_i)/2; r_m = (D_o + D_i)/4
     sigma_bend = M_hypo/(2*b_arr*t_wall*r_m)
@@ -249,13 +226,11 @@ def generate_suggestions(ver):
             break
     return suggestions
 
-# ==================== 自动推荐点胶位置（分级搜索） ====================
+# ==================== 自动推荐点胶位置 ====================
 def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=2.0):
     x = np.linspace(0, ver['L_total'], 500)
     cp = ver.get('complex_params', {})
-    x_stretch = cp.get('x_stretch_start', 80.0)
     x_coil = cp.get('x_coil_end', 120.0)
-    pitch_mode = cp.get('pitch_mode', 'constant')
 
     search_end = ver['L_total'] - glue_length
 
@@ -280,7 +255,6 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=2.0):
             mask = (x[:-1] >= gs - 5) & (x[:-1] <= ge + 5)
             local_slope = np.max(dGJ[mask]) if np.any(mask) else max_slope
             local_drt = np.max(dRT[mask]) if np.any(mask) else np.max(dRT)
-            # 综合评分：刚度平滑度 + 传递比例平滑度
             score = local_slope + 0.3 * max_slope + 50.0 * local_drt
             return (gs, ge, max_slope, local_slope, score)
         except Exception:
@@ -302,30 +276,20 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=2.0):
         results.sort(key=lambda r: r[4])
         return results
 
-    # Level 1: 严格约束
-    if pitch_mode != 'constant':
-        results = scan(lambda gs, ge: ge <= x_coil and (ge <= x_stretch or gs >= x_coil))
-    else:
-        results = scan(lambda gs, ge: ge <= x_coil)
+    # Level 1: 严格约束（终点≤弹簧圈末端）
+    results = scan(lambda gs, ge: ge <= x_coil)
     if results:
         b = results[0]
         return b[0], b[1], b[2], results, 'strict'
 
-    # Level 2: 放宽渐变段约束
-    if pitch_mode != 'constant':
-        results = scan(lambda gs, ge: ge <= x_coil)
-        if results:
-            b = results[0]
-            return b[0], b[1], b[2], results, 'relaxed_avoid'
-
-    # Level 3: 允许略微超出弹簧圈末端
+    # Level 2: 允许略微超出弹簧圈末端
     overrun = max(glue_length * 0.3, 5.0)
     results = scan(lambda gs, ge: ge <= x_coil + overrun)
     if results:
         b = results[0]
         return b[0], b[1], b[2], results, 'overrun'
 
-    # Level 4: 任意位置
+    # Level 3: 任意位置
     results = scan(lambda gs, ge: True)
     if results:
         b = results[0]
@@ -427,12 +391,6 @@ if 'spring_end_input' not in st.session_state: st.session_state.spring_end_input
 if 'glue_input' not in st.session_state: st.session_state.glue_input = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
 for k in eta_keys:
     if k + '_input' not in st.session_state: st.session_state[k + '_input'] = eta_defaults[k]
-if 'x_stretch_start_input' not in st.session_state: st.session_state.x_stretch_start_input = 80.0
-if 'x_coil_end_input' not in st.session_state: st.session_state.x_coil_end_input = 120.0
-if 'p_start_input' not in st.session_state: st.session_state.p_start_input = 0.045
-if 'p_end_input' not in st.session_state: st.session_state.p_end_input = 0.061
-if 'pitch_mode_input' not in st.session_state: st.session_state.pitch_mode_input = "恒定螺距"
-if 'n_segments_input' not in st.session_state: st.session_state.n_segments_input = 3
 
 # ==================== 侧边栏 ====================
 with st.sidebar:
@@ -534,17 +492,6 @@ with st.sidebar:
         st.number_input("扭转", step=0.05, key="no_spring_t_input")
         st.number_input("轴向", step=0.05, key="no_spring_a_input")
 
-    st.subheader("弹簧圈螺距模式（可选）")
-    pitch_mode = st.selectbox("螺距模式", ["恒定螺距", "分段螺距", "平滑渐变"], key="pitch_mode_input")
-    with st.expander("螺距参数"):
-        st.number_input("拉伸起点 (mm)", step=1.0, key="x_stretch_start_input")
-        st.number_input("弹簧圈末端 (mm)", step=1.0, key="x_coil_end_input")
-        st.number_input("初始螺距 (mm)", step=0.001, format="%.4f", key="p_start_input")
-        if pitch_mode != "恒定螺距":
-            st.number_input("末端螺距 (mm)", step=0.001, format="%.4f", key="p_end_input")
-        if pitch_mode == "分段螺距":
-            st.number_input("分段数", step=1, min_value=2, max_value=10, key="n_segments_input")
-
     if st.button("保存当前版本", type="primary"):
         glue_intervals = []
         glue_text = st.session_state.glue_input
@@ -556,7 +503,6 @@ with st.sidebar:
                     except: pass
         hypo_segments = parse_hypo_functions(st.session_state.hypo_text_input)
         eta = {k: st.session_state[k + '_input'] for k in eta_keys}
-        pitch_mode_key = {'恒定螺距': 'constant', '分段螺距': 'segmented', '平滑渐变': 'gradient'}[st.session_state.pitch_mode_input]
         version = {
             'name': st.session_state.name_input,
             'E_core': E_core, 'G_core': G_core, 'E_hypo': E_hypo, 'G_hypo': G_hypo,
@@ -567,13 +513,7 @@ with st.sidebar:
             'hypo_segments': hypo_segments,
             'eta': eta,
             'complex_params': {
-                'x_stretch_start': st.session_state.x_stretch_start_input,
-                'x_coil_end': st.session_state.x_coil_end_input,
-                'p_start': st.session_state.p_start_input,
-                'p_end': st.session_state.p_end_input,
                 'eta_glue_peak': 0.90,
-                'pitch_mode': pitch_mode_key,
-                'n_segments': st.session_state.get('n_segments_input', 3),
             }
         }
         st.session_state.saved_versions.append(version)
@@ -598,15 +538,6 @@ else:
             st.session_state.glue_input = "\n".join([f"{s},{e},{t}" for s,e,t in ver['glue_intervals']])
             for k in eta_keys:
                 st.session_state[k + '_input'] = ver['eta'][k]
-            cp = ver.get('complex_params', {})
-            if cp:
-                st.session_state.x_stretch_start_input = cp.get('x_stretch_start', 80.0)
-                st.session_state.x_coil_end_input = cp.get('x_coil_end', 120.0)
-                st.session_state.p_start_input = cp.get('p_start', 0.045)
-                st.session_state.p_end_input = cp.get('p_end', 0.061)
-                pm = cp.get('pitch_mode', 'constant')
-                st.session_state.pitch_mode_input = {'constant':'恒定螺距','segmented':'分段螺距','gradient':'平滑渐变'}[pm]
-                st.session_state.n_segments_input = cp.get('n_segments', 3)
             st.rerun()
         if col3.button("删除", key=f"del_{idx}"):
             st.session_state.saved_versions.pop(idx)
@@ -654,7 +585,7 @@ else:
             axes3[0].legend(); axes3[1].legend()
             st.pyplot(fig1); st.pyplot(fig2); st.pyplot(fig3)
 
-    # ========== 生成参数改进建议（含自动推荐点胶位置） ==========
+    # ========== 生成参数改进建议 ==========
     glue_length_input = st.number_input("点胶长度 (mm)", min_value=1.0, max_value=50.0, value=10.0, step=0.5, key="glue_length_input_combined")
 
     if st.button("生成参数改进建议"):
@@ -675,7 +606,7 @@ else:
                     st.markdown(f"```\n{s['formula']}\n```")
                 st.divider()
 
-                # ---------- 2. 原版 vs 平滑版对比 ----------
+                # ---------- 2. 原版 vs 平滑版 ----------
                 st.markdown("### 原版 vs 平滑改进（仅海波管 + 芯丝）")
                 x = np.linspace(0, ver['L_total'], 500)
                 base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
@@ -721,9 +652,8 @@ else:
                 # ---------- 3. 自动推荐点胶位置 ----------
                 st.markdown("### 自动推荐点胶位置")
                 cp = ver.get('complex_params', {})
-                pitch_mode = cp.get('pitch_mode', 'constant')
-                mode_name = {'constant':'恒定螺距','segmented':'分段螺距','gradient':'平滑渐变'}[pitch_mode]
-                st.write(f"弹簧圈螺距模式：**{mode_name}**　|　弹簧圈末端：**{cp.get('x_coil_end', 120.0):.0f} mm**")
+                x_coil = cp.get('x_coil_end', ver.get('spring_end', 120.0))
+                st.write(f"弹簧圈末端：**{x_coil:.0f} mm**")
 
                 with st.spinner(f"正在确定 {ver['name']} 的推荐点胶位置..."):
                     best_start, best_end, best_slope, results, status = get_recommended_glue_position(
@@ -736,8 +666,7 @@ else:
                     continue
 
                 status_msgs = {
-                    'strict': ('success', '严格约束满足（终点≤弹簧圈末端，且避开渐变段）'),
-                    'relaxed_avoid': ('warning', '严格约束下无可行位置，已放宽"避开弹簧圈渐变段"约束'),
+                    'strict': ('success', '严格约束满足（终点≤弹簧圈末端）'),
                     'overrun': ('warning', '严格约束下无可行位置，点胶终点已略微超过弹簧圈末端'),
                     'any': ('warning', '约束极紧，已在所有可能位置中选择最优'),
                     'fixed': ('info', '固定推荐位置'),
@@ -749,7 +678,7 @@ else:
 
                 st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm）")
 
-                # ---------- 4. 原版 vs 推荐版：刚度 + 力传递对比 ----------
+                # ---------- 4. 原版 vs 推荐版 ----------
                 cp_full = {**cp, 'eta_glue_peak': 0.90}
 
                 base_glue_orig = [(0, 1, 'full')]
@@ -760,7 +689,7 @@ else:
                 params_orig2 = dict(base_params); params_orig2['glue_intervals'] = base_glue_orig
                 res_orig = compute_version(x, ver['core_df'], ver['hypo_segments'], params_orig2, ver['eta'],
                                            smooth=True, spring_enabled=True, complex_params=cp_full)
-                GJ_orig, phi_orig, Th_orig, Tc_orig, rt_orig = res_orig[1], res_orig[7], res_orig[8], res_orig[9], res_orig[10]
+                GJ_orig, phi_orig, rt_orig = res_orig[1], res_orig[7], res_orig[10]
 
                 base_glue_best = [(0, 1, 'full')]
                 for g in ver['glue_intervals']:
@@ -786,7 +715,7 @@ else:
                 axes[1].set_xlim(0, 200)
                 st.pyplot(fig)
 
-                # 4.2 力传递：海波管扭矩分配比例
+                # 4.2 力传递：海波管承担的扭矩比例
                 st.markdown("#### 力传递：海波管承担的扭矩比例")
                 fig_ft, axes_ft = plt.subplots(1, 1, figsize=(11, 4))
                 axes_ft.plot(x, rt_orig, label='Original', color='blue', linewidth=2)
@@ -799,7 +728,7 @@ else:
                 axes_ft.set_xlim(0, 200)
                 st.pyplot(fig_ft)
 
-                # 4.3 力传递：海波管和芯丝的实际扭矩
+                # 4.3 力传递：芯丝与海波管实际承担的扭矩
                 st.markdown("#### 力传递：芯丝与海波管实际承担的扭矩")
                 fig_tc, axes_tc = plt.subplots(1, 1, figsize=(11, 4))
                 axes_tc.plot(x, Th_best, label='Hypo tube torque (recommended)', color='red', linewidth=2)
