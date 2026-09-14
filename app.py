@@ -109,6 +109,8 @@ def get_pitch(x, x_stretch_start, x_coil_end, p_start, p_end, pitch_mode='consta
 
 def eta_t_spring(x, glue_intervals, x_stretch_start, x_coil_end, p_start, p_end,
                  eta_base, eta_glue_peak, pitch_mode='constant', n_segments=3):
+    """传递效率 η_t：物理上是界面耦合强度与参考耦合强度之比。
+    螺距越大 → 圈数越少 → 弹簧圈与海波管接触越松 → 耦合越弱 → η_t 越小。"""
     if x <= 1: return 1.0
     if x <= x_stretch_start or x > x_coil_end:
         base = eta_base
@@ -191,8 +193,11 @@ def compute_version(x, core_df, hypo_segments, params, eta_global,
 
     M_total = F*x; T_total = T0*x/L_total
     ratio_b = (eta_b_arr*EI_hypo)/(EI_core + eta_b_arr*EI_hypo)
+    # 关键：扭矩分配比例（力传递），由传递效率 η_t 决定
     ratio_t = (eta_t_arr*GJ_hypo)/(GJ_core + eta_t_arr*GJ_hypo)
-    M_hypo = ratio_b*M_total; T_hypo = ratio_t*T_total
+    M_hypo = ratio_b*M_total
+    T_hypo = ratio_t*T_total  # 海波管承担的扭矩
+    T_core = T_total - T_hypo # 芯丝承担的扭矩
 
     t_wall = (D_o - D_i)/2; r_m = (D_o + D_i)/4
     sigma_bend = M_hypo/(2*b_arr*t_wall*r_m)
@@ -205,7 +210,8 @@ def compute_version(x, core_df, hypo_segments, params, eta_global,
     y_def = y_def - y_def[-1]
     phi = cumulative_trapezoid(T_total/GJ_total, x, initial=0)
 
-    return (EI_total, GJ_total, EA_total, sigma_bend, tau_tors, sigma_eq, y_def, phi)
+    return (EI_total, GJ_total, EA_total, sigma_bend, tau_tors, sigma_eq, y_def, phi,
+            T_hypo, T_core, ratio_t, eta_t_arr)
 
 # ==================== 参数改进建议 ====================
 def generate_suggestions(ver):
@@ -245,11 +251,6 @@ def generate_suggestions(ver):
 
 # ==================== 自动推荐点胶位置（分级搜索） ====================
 def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=2.0):
-    """
-    分级搜索最优点胶位置。
-    返回 (best_start, best_end, best_slope, results, status)
-    status: 'strict' | 'relaxed_avoid' | 'overrun' | 'any' | 'none'
-    """
     x = np.linspace(0, ver['L_total'], 500)
     cp = ver.get('complex_params', {})
     x_stretch = cp.get('x_stretch_start', 80.0)
@@ -267,16 +268,21 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=2.0):
         test_glue = list(base_glue) + [(gs, ge, 'core_spring')]
         params = dict(base_params); params['glue_intervals'] = test_glue
         try:
-            _, GJ, _, _, _, _, _, _ = compute_version(
+            res = compute_version(
                 x, ver['core_df'], ver['hypo_segments'], params, ver['eta'],
                 smooth=True, spring_enabled=True,
                 complex_params={**cp, 'eta_glue_peak': 0.90}
             )
+            GJ = res[1]; ratio_t = res[10]
             dGJ = np.abs(np.diff(GJ) / np.diff(x))
+            dRT = np.abs(np.diff(ratio_t) / np.diff(x))
             max_slope = np.max(dGJ)
             mask = (x[:-1] >= gs - 5) & (x[:-1] <= ge + 5)
             local_slope = np.max(dGJ[mask]) if np.any(mask) else max_slope
-            return (gs, ge, max_slope, local_slope)
+            local_drt = np.max(dRT[mask]) if np.any(mask) else np.max(dRT)
+            # 综合评分：刚度平滑度 + 传递比例平滑度
+            score = local_slope + 0.3 * max_slope + 50.0 * local_drt
+            return (gs, ge, max_slope, local_slope, score)
         except Exception:
             return None
 
@@ -293,10 +299,10 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=2.0):
             r = evaluate(gs, ge)
             if r is not None:
                 results.append(r)
-        results.sort(key=lambda r: r[3] + 0.3 * r[2])
+        results.sort(key=lambda r: r[4])
         return results
 
-    # Level 1: 严格约束（终点≤弹簧圈末端，避开渐变段）
+    # Level 1: 严格约束
     if pitch_mode != 'constant':
         results = scan(lambda gs, ge: ge <= x_coil and (ge <= x_stretch or gs >= x_coil))
     else:
@@ -305,21 +311,21 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=80.0, step=2.0):
         b = results[0]
         return b[0], b[1], b[2], results, 'strict'
 
-    # Level 2: 放宽"避开渐变段"约束（仅渐变模式有意义）
+    # Level 2: 放宽渐变段约束
     if pitch_mode != 'constant':
         results = scan(lambda gs, ge: ge <= x_coil)
         if results:
             b = results[0]
             return b[0], b[1], b[2], results, 'relaxed_avoid'
 
-    # Level 3: 允许终点略微超过弹簧圈末端
+    # Level 3: 允许略微超出弹簧圈末端
     overrun = max(glue_length * 0.3, 5.0)
     results = scan(lambda gs, ge: ge <= x_coil + overrun)
     if results:
         b = results[0]
         return b[0], b[1], b[2], results, 'overrun'
 
-    # Level 4: 任意位置（起点仍然 ≥ search_start）
+    # Level 4: 任意位置
     results = scan(lambda gs, ge: True)
     if results:
         b = results[0]
@@ -346,16 +352,17 @@ def get_recommended_glue_position(ver, glue_length=10.0):
         test_glue = list(base_glue) + [(fixed_start, fixed_end, 'core_spring')]
         params = dict(base_params); params['glue_intervals'] = test_glue
         try:
-            _, GJ, _, _, _, _, _, _ = compute_version(
+            res = compute_version(
                 x, ver['core_df'], ver['hypo_segments'], params, ver['eta'],
                 smooth=True, spring_enabled=True,
                 complex_params={**cp, 'eta_glue_peak': 0.90}
             )
+            GJ = res[1]
             dGJ = np.abs(np.diff(GJ) / np.diff(x))
             max_slope = np.max(dGJ)
         except Exception:
             max_slope = 0.0
-        return fixed_start, fixed_end, max_slope, [(fixed_start, fixed_end, max_slope, max_slope)], 'fixed'
+        return fixed_start, fixed_end, max_slope, [(fixed_start, fixed_end, max_slope, max_slope, 0.0)], 'fixed'
     else:
         return find_best_glue_position(ver, glue_length=glue_length, search_start=80.0, step=2.0)
 
@@ -635,7 +642,8 @@ else:
                 ver = st.session_state.saved_versions[idx]
                 color = COLORS[idx % len(COLORS)]; label = ver['name']
                 params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end','glue_intervals']}
-                EI,GJ,EA,sb,tt,se,yd,ph = compute_version(x, ver['core_df'], ver['hypo_segments'], params, ver['eta'])
+                res = compute_version(x, ver['core_df'], ver['hypo_segments'], params, ver['eta'])
+                EI,GJ,EA,sb,tt,se,yd,ph = res[0],res[1],res[2],res[3],res[4],res[5],res[6],res[7]
                 axes1[0].plot(x,EI,color=color,linewidth=2,label=label); axes1[1].plot(x,GJ,color=color,linewidth=2,label=label)
                 axes1[2].plot(x,EA,color=color,linewidth=2,label=label)
                 axes2[0].plot(x,sb,color=color,linewidth=2,label=label); axes2[1].plot(x,tt,color=color,linewidth=2,label=label)
@@ -669,46 +677,42 @@ else:
 
                 # ---------- 2. 原版 vs 平滑版对比 ----------
                 st.markdown("### 原版 vs 平滑改进（仅海波管 + 芯丝）")
-                st.markdown("""
-                - **原版（蓝色）**：原始海波管分段和芯丝直径过渡
-                - **平滑版（橙色虚线）**：海波管 Hermite 平滑 + 芯丝 S 形过渡
-                """)
                 x = np.linspace(0, ver['L_total'], 500)
                 base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
 
                 params_orig = dict(base_params)
                 params_orig['glue_intervals'] = ver['glue_intervals']
-                EI_o, GJ_o, EA_o, sb_o, tt_o, se_o, y_o, phi_o = compute_version(
-                    x, ver['core_df'], ver['hypo_segments'], params_orig, ver['eta'],
-                    smooth=False, spring_enabled=False)
+                res_o = compute_version(x, ver['core_df'], ver['hypo_segments'], params_orig, ver['eta'],
+                                        smooth=False, spring_enabled=False)
+                EI_o, GJ_o, EA_o, y_o, phi_o = res_o[0], res_o[1], res_o[2], res_o[6], res_o[7]
 
                 params_smooth = dict(base_params)
                 params_smooth['glue_intervals'] = ver['glue_intervals']
-                EI_s, GJ_s, EA_s, sb_s, tt_s, se_s, y_s, phi_s = compute_version(
-                    x, ver['core_df'], ver['hypo_segments'], params_smooth, ver['eta'],
-                    smooth=True, spring_enabled=False)
+                res_s = compute_version(x, ver['core_df'], ver['hypo_segments'], params_smooth, ver['eta'],
+                                        smooth=True, spring_enabled=False)
+                EI_s, GJ_s, EA_s, y_s, phi_s = res_s[0], res_s[1], res_s[2], res_s[6], res_s[7]
 
                 fig_stiff, axes_stiff = plt.subplots(3, 1, figsize=(11, 12))
                 axes_stiff[0].plot(x, EI_o, label='Original', color='blue', linewidth=2)
-                axes_stiff[0].plot(x, EI_s, label='Smooth (hypo+core)', color='orange', linestyle='--', linewidth=2)
+                axes_stiff[0].plot(x, EI_s, label='Smooth', color='orange', linestyle='--', linewidth=2)
                 axes_stiff[0].set_ylabel('Bending stiffness EI (N·mm²)'); axes_stiff[0].grid(True); axes_stiff[0].legend()
                 axes_stiff[0].set_title(f"{ver['name']} - Bending stiffness")
                 axes_stiff[1].plot(x, GJ_o, label='Original', color='blue', linewidth=2)
-                axes_stiff[1].plot(x, GJ_s, label='Smooth (hypo+core)', color='orange', linestyle='--', linewidth=2)
+                axes_stiff[1].plot(x, GJ_s, label='Smooth', color='orange', linestyle='--', linewidth=2)
                 axes_stiff[1].set_ylabel('Torsional stiffness GJ (N·mm²)'); axes_stiff[1].grid(True); axes_stiff[1].legend()
                 axes_stiff[1].set_xlim(0, 200)
                 axes_stiff[2].plot(x, EA_o, label='Original', color='blue', linewidth=2)
-                axes_stiff[2].plot(x, EA_s, label='Smooth (hypo+core)', color='orange', linestyle='--', linewidth=2)
+                axes_stiff[2].plot(x, EA_s, label='Smooth', color='orange', linestyle='--', linewidth=2)
                 axes_stiff[2].set_ylabel('Axial stiffness EA (N)'); axes_stiff[2].set_xlabel('Distance from distal end (mm)')
                 axes_stiff[2].grid(True); axes_stiff[2].legend()
                 st.pyplot(fig_stiff)
 
                 fig_def, axes_def = plt.subplots(2, 1, figsize=(11, 7))
                 axes_def[0].plot(x, y_o, label='Original', color='blue', linewidth=2)
-                axes_def[0].plot(x, y_s, label='Smooth (hypo+core)', color='orange', linestyle='--', linewidth=2)
+                axes_def[0].plot(x, y_s, label='Smooth', color='orange', linestyle='--', linewidth=2)
                 axes_def[0].set_ylabel('Deflection (mm)'); axes_def[0].grid(True); axes_def[0].legend()
                 axes_def[1].plot(x, phi_o, label='Original', color='blue', linewidth=2)
-                axes_def[1].plot(x, phi_s, label='Smooth (hypo+core)', color='orange', linestyle='--', linewidth=2)
+                axes_def[1].plot(x, phi_s, label='Smooth', color='orange', linestyle='--', linewidth=2)
                 axes_def[1].set_ylabel('Twist angle (rad)'); axes_def[1].set_xlabel('Distance from distal end (mm)')
                 axes_def[1].grid(True); axes_def[1].legend()
                 st.pyplot(fig_def)
@@ -727,33 +731,25 @@ else:
                     )
 
                 if status == 'none' or best_start is None:
-                    st.error("无法找到任何可行位置（搜索范围或导丝长度不足）。")
+                    st.error("无法找到任何可行位置。")
                     st.divider()
                     continue
 
-                # 状态提示
                 status_msgs = {
                     'strict': ('success', '严格约束满足（终点≤弹簧圈末端，且避开渐变段）'),
                     'relaxed_avoid': ('warning', '严格约束下无可行位置，已放宽"避开弹簧圈渐变段"约束'),
                     'overrun': ('warning', '严格约束下无可行位置，点胶终点已略微超过弹簧圈末端'),
                     'any': ('warning', '约束极紧，已在所有可能位置中选择最优'),
-                    'fixed': ('info', '固定推荐位置（Version 1 + 点胶长度 10 mm）'),
+                    'fixed': ('info', '固定推荐位置'),
                 }
                 level, msg = status_msgs.get(status, ('info', ''))
-                if level == 'success':
-                    st.success(msg)
-                elif level == 'warning':
-                    st.warning(msg)
-                else:
-                    st.info(msg)
+                if level == 'success': st.success(msg)
+                elif level == 'warning': st.warning(msg)
+                else: st.info(msg)
 
                 st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm）")
-                if len(results) > 1:
-                    st.markdown("**候选排名（前5）：**")
-                    for i, (gs, ge, ms, ls) in enumerate(results[:5]):
-                        st.write(f"{i+1}. {gs:.0f}–{ge:.0f} mm，局部斜率 {ls:.3f}，全局斜率 {ms:.3f}")
 
-                # ---------- 4. 原版 vs 推荐版对比 ----------
+                # ---------- 4. 原版 vs 推荐版：刚度 + 力传递对比 ----------
                 cp_full = {**cp, 'eta_glue_peak': 0.90}
 
                 base_glue_orig = [(0, 1, 'full')]
@@ -762,19 +758,20 @@ else:
                 for g in ver['glue_intervals']:
                     if g[0] > 200: base_glue_orig.append(g)
                 params_orig2 = dict(base_params); params_orig2['glue_intervals'] = base_glue_orig
-                _, GJ_orig, _, _, _, _, y_orig, phi_orig = compute_version(
-                    x, ver['core_df'], ver['hypo_segments'], params_orig2, ver['eta'],
-                    smooth=True, spring_enabled=True, complex_params=cp_full)
+                res_orig = compute_version(x, ver['core_df'], ver['hypo_segments'], params_orig2, ver['eta'],
+                                           smooth=True, spring_enabled=True, complex_params=cp_full)
+                GJ_orig, phi_orig, Th_orig, Tc_orig, rt_orig = res_orig[1], res_orig[7], res_orig[8], res_orig[9], res_orig[10]
 
                 base_glue_best = [(0, 1, 'full')]
                 for g in ver['glue_intervals']:
                     if g[0] > 200: base_glue_best.append(g)
                 base_glue_best.append((best_start, best_end, 'core_spring'))
                 params_best = dict(base_params); params_best['glue_intervals'] = base_glue_best
-                _, GJ_best, _, _, _, _, y_best, phi_best = compute_version(
-                    x, ver['core_df'], ver['hypo_segments'], params_best, ver['eta'],
-                    smooth=True, spring_enabled=True, complex_params=cp_full)
+                res_best = compute_version(x, ver['core_df'], ver['hypo_segments'], params_best, ver['eta'],
+                                           smooth=True, spring_enabled=True, complex_params=cp_full)
+                GJ_best, phi_best, Th_best, Tc_best, rt_best = res_best[1], res_best[7], res_best[8], res_best[9], res_best[10]
 
+                # 4.1 扭转刚度 + 扭转角
                 fig, axes = plt.subplots(2, 1, figsize=(11, 8))
                 axes[0].plot(x, GJ_orig, label='Original', color='blue', linewidth=2)
                 axes[0].plot(x, GJ_best, label=f'Recommended: {best_start:.0f}-{best_end:.0f} mm', color='green', linestyle='--', linewidth=2)
@@ -788,4 +785,29 @@ else:
                 axes[1].grid(True); axes[1].legend()
                 axes[1].set_xlim(0, 200)
                 st.pyplot(fig)
+
+                # 4.2 力传递：海波管扭矩分配比例
+                st.markdown("#### 力传递：海波管承担的扭矩比例")
+                fig_ft, axes_ft = plt.subplots(1, 1, figsize=(11, 4))
+                axes_ft.plot(x, rt_orig, label='Original', color='blue', linewidth=2)
+                axes_ft.plot(x, rt_best, label='Recommended', color='green', linestyle='--', linewidth=2)
+                axes_ft.axvline(best_start, color='green', linestyle=':', alpha=0.5)
+                axes_ft.axvline(best_end, color='green', linestyle=':', alpha=0.5)
+                axes_ft.set_ylabel('T_hypo / T_total')
+                axes_ft.set_xlabel('Distance from distal end (mm)')
+                axes_ft.grid(True); axes_ft.legend()
+                axes_ft.set_xlim(0, 200)
+                st.pyplot(fig_ft)
+
+                # 4.3 力传递：海波管和芯丝的实际扭矩
+                st.markdown("#### 力传递：芯丝与海波管实际承担的扭矩")
+                fig_tc, axes_tc = plt.subplots(1, 1, figsize=(11, 4))
+                axes_tc.plot(x, Th_best, label='Hypo tube torque (recommended)', color='red', linewidth=2)
+                axes_tc.plot(x, Tc_best, label='Core torque (recommended)', color='blue', linestyle='--', linewidth=2)
+                axes_tc.set_ylabel('Torque (N·mm)')
+                axes_tc.set_xlabel('Distance from distal end (mm)')
+                axes_tc.grid(True); axes_tc.legend()
+                axes_tc.set_xlim(0, 200)
+                st.pyplot(fig_tc)
+
                 st.divider()
