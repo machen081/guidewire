@@ -94,12 +94,6 @@ def interp_core(x_val, core_df, smooth=False):
 
 # ==================== 弹簧圈螺距模型 ====================
 def get_pitch(x, x_stretch_start, x_coil_end, p_start, p_end, pitch_mode='constant', n_segments=3):
-    """
-    pitch_mode:
-    - 'constant': 螺距恒定 p_start
-    - 'segmented': 分段变化，n_segments段，每段螺距线性递增
-    - 'gradient': 平滑渐变
-    """
     if x < x_stretch_start or x > x_coil_end:
         return p_start
     if pitch_mode == 'constant':
@@ -108,13 +102,12 @@ def get_pitch(x, x_stretch_start, x_coil_end, p_start, p_end, pitch_mode='consta
         seg_len = (x_coil_end - x_stretch_start) / n_segments
         idx = int((x - x_stretch_start) / seg_len)
         idx = min(idx, n_segments - 1)
-        p = p_start + (p_end - p_start) * (idx + 1) / n_segments
-        return p
-    else:  # gradient
+        return p_start + (p_end - p_start) * (idx + 1) / n_segments
+    else:
         t = (x - x_stretch_start) / (x_coil_end - x_stretch_start)
         return p_start + (p_end - p_start) * t
 
-def eta_t_spring(x, glue_intervals, x_stretch_start, x_coil_end, p_start, p_end, 
+def eta_t_spring(x, glue_intervals, x_stretch_start, x_coil_end, p_start, p_end,
                  eta_base, eta_glue_peak, pitch_mode='constant', n_segments=3):
     if x <= 1: return 1.0
     if x <= x_stretch_start or x > x_coil_end:
@@ -214,12 +207,72 @@ def compute_version(x, core_df, hypo_segments, params, eta_global,
 
     return (EI_total, GJ_total, EA_total, sigma_bend, tau_tors, sigma_eq, y_def, phi)
 
+# ==================== 参数改进建议 ====================
+def generate_suggestions(ver):
+    suggestions = []
+    hypo_segments = ver['hypo_segments']
+    for i, seg in enumerate(hypo_segments):
+        if i == 0: continue
+        prev = hypo_segments[i-1]
+        boundary = seg[0]
+        if abs(prev[1] - boundary) > 1e-6:
+            suggestions.append({
+                'type': '海波管分段不连续', 'position': boundary,
+                'description': f"前段结束于 {prev[1]} mm，后段开始于 {boundary} mm，存在间隙或重叠。",
+                'formula': "调整区间使前段 end 等于后段 start。",
+            })
+        else:
+            delta = 2.0; xb = boundary
+            suggestions.append({
+                'type': '海波管参数突变', 'position': boundary,
+                'description': f"在 x={boundary} mm 处参数变化，建议使用三次样条过渡。",
+                'formula': (f"在 [{xb-delta}, {xb+delta}] mm 区间内使用三次多项式：\n"
+                            f"f(x) = a0 + a1*(x-{xb}) + a2*(x-{xb})^2 + a3*(x-{xb})^3\n"
+                            f"系数由端点值和斜率匹配条件确定。"),
+            })
+    glue = ver['glue_intervals']
+    for g in glue:
+        for boundary in [g[0], g[1]]:
+            delta = 2.0; x0 = boundary
+            suggestions.append({
+                'type': '传递系数阶跃', 'position': boundary,
+                'description': f"点胶区间边界 x={boundary} mm 处传递系数可能阶跃。",
+                'formula': (f"在 [{x0-delta}, {x0+delta}] mm 内使用 S 形过渡：\n"
+                            f"η(x) = η1 + (η2-η1) * S((x-{x0})/Δ)\n"
+                            f"S(t) = 0.5 + 0.75*t - 0.25*t^3"),
+            })
+    for boundary in [ver['spring_start'], ver['spring_end']]:
+        suggestions.append({
+            'type': '弹簧圈边界传递系数变化', 'position': boundary,
+            'description': f"弹簧圈边界 x={boundary} mm 处传递系数变化。",
+            'formula': "在边界 ±2 mm 内使用 S 形过渡。",
+        })
+    core_df = ver['core_df']
+    for _, row in core_df.iterrows():
+        if row['d_start'] != row['d_end']:
+            L_t = row['end'] - row['start']; x1 = row['start']
+            d1 = row['d_start']; d2 = row['d_end']
+            suggestions.append({
+                'type': '芯丝直径线性过渡', 'position': f"{x1}-{row['end']} mm",
+                'description': "当前为线性过渡，建议改为 S 形曲线。",
+                'formula': f"d(x) = {d1} + ({d2}-{d1}) * [3*((x-{x1})/{L_t})^2 - 2*((x-{x1})/{L_t})^3]",
+            })
+            break
+    cp = ver.get('complex_params', {})
+    suggestions.append({
+        'type': '弹簧圈螺距模式', 'position': '弹簧圈段',
+        'description': f"当前螺距模式：{cp.get('pitch_mode','constant')}",
+        'formula': '可切换为恒定/分段/平滑渐变。',
+    })
+    return suggestions
+
 # ==================== 自动推荐点胶位置 ====================
 def find_best_glue_position(ver, glue_length=10.0, search_start=20.0, search_end=200.0, step=2.0):
     x = np.linspace(0, ver['L_total'], 500)
     cp = ver.get('complex_params', {})
     x_stretch = cp.get('x_stretch_start', 80.0)
     x_coil = cp.get('x_coil_end', 120.0)
+    pitch_mode = cp.get('pitch_mode', 'constant')
 
     base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
     base_glue = [(0, 1, 'full')]
@@ -229,8 +282,7 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=20.0, search_end
     results = []
     for gs in np.arange(search_start, search_end - glue_length, step):
         ge = gs + glue_length
-        # 避开弹簧圈渐变段（若弹簧圈启用渐变）
-        if cp.get('pitch_mode', 'constant') != 'constant':
+        if pitch_mode != 'constant':
             if not (ge <= x_stretch or gs >= x_coil):
                 continue
         test_glue = list(base_glue) + [(gs, ge, 'core_spring')]
@@ -248,7 +300,6 @@ def find_best_glue_position(ver, glue_length=10.0, search_start=20.0, search_end
             results.append((gs, ge, max_slope, local_slope))
         except Exception:
             continue
-
     if not results:
         return None, None, None, []
     results.sort(key=lambda r: r[3] + 0.3 * r[2])
@@ -507,6 +558,7 @@ else:
         if st.checkbox(ver['name'], key=f"check_{idx}"):
             selected_indices.append(idx)
 
+    # ========== 生成对比曲线 ==========
     if st.button("生成对比曲线", type="primary"):
         if not selected_indices:
             st.warning("请至少选择一个版本")
@@ -541,19 +593,150 @@ else:
             axes3[0].legend(); axes3[1].legend()
             st.pyplot(fig1); st.pyplot(fig2); st.pyplot(fig3)
 
+    # ========== 生成参数改进建议 + 三种方案对比 ==========
+    if st.button("生成参数改进建议"):
+        if not st.session_state.saved_versions:
+            st.warning("请先保存版本")
+        else:
+            for ver in st.session_state.saved_versions:
+                st.subheader(f"版本：{ver['name']}")
+                suggestions = generate_suggestions(ver)
+                for s in suggestions:
+                    st.markdown(f"**{s['type']}** (位置: {s['position']})")
+                    st.write(s['description'])
+                    st.markdown(f"```\n{s['formula']}\n```")
+                st.divider()
+
+            st.markdown("---")
+            st.markdown("### 三种方案对比")
+            st.markdown("""
+            - **原版（蓝色）**：原始点胶位置、弹簧圈螺距模式
+            - **平滑版（橙色虚线）**：海波管 Hermite 平滑 + 芯丝 S 形过渡，其他参数不变
+            - **优化版（绿色点划线）**：平滑 + 弹簧圈螺距模式 + 自动推荐点胶位置
+            """)
+
+            glue_length = st.number_input("优化版点胶长度 (mm)", min_value=1.0, max_value=50.0, value=10.0, step=0.5, key="glue_length_input")
+
+            for ver in st.session_state.saved_versions:
+                st.subheader(f"对比：{ver['name']}")
+                x = np.linspace(0, ver['L_total'], 500)
+                cp = ver.get('complex_params', {
+                    'x_stretch_start':80.0,'x_coil_end':120.0,'p_start':0.045,'p_end':0.061,
+                    'eta_glue_peak':0.90,'pitch_mode':'constant','n_segments':3,
+                })
+                cp_full = {**cp, 'eta_glue_peak': 0.90}
+
+                base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
+
+                # 1. 原版
+                params_orig = dict(base_params)
+                params_orig['glue_intervals'] = ver['glue_intervals']
+                EI_o, GJ_o, EA_o, sb_o, tt_o, se_o, y_o, phi_o = compute_version(
+                    x, ver['core_df'], ver['hypo_segments'], params_orig, ver['eta'],
+                    smooth=False, spring_enabled=False)
+
+                # 2. 平滑版
+                params_smooth = dict(base_params)
+                params_smooth['glue_intervals'] = ver['glue_intervals']
+                EI_s, GJ_s, EA_s, sb_s, tt_s, se_s, y_s, phi_s = compute_version(
+                    x, ver['core_df'], ver['hypo_segments'], params_smooth, ver['eta'],
+                    smooth=True, spring_enabled=False)
+
+                # 3. 优化版
+                with st.spinner(f"正在扫描 {ver['name']} 的最优点胶位置..."):
+                    best_start, best_end, best_slope, results = find_best_glue_position(
+                        ver, glue_length=glue_length, search_start=20.0, search_end=200.0, step=2.0
+                    )
+
+                if best_start is None:
+                    st.warning("未找到可行位置，使用原点胶位置。")
+                    best_start, best_end = 70.0, 80.0
+
+                glue_opt = [(0, 1, 'full')]
+                for g in ver['glue_intervals']:
+                    if g[0] > 200: glue_opt.append(g)
+                glue_opt.append((best_start, best_end, 'core_spring'))
+
+                params_opt = dict(base_params)
+                params_opt['glue_intervals'] = glue_opt
+                EI_op, GJ_op, EA_op, sb_op, tt_op, se_op, y_op, phi_op = compute_version(
+                    x, ver['core_df'], ver['hypo_segments'], params_opt, ver['eta'],
+                    smooth=True, spring_enabled=True, complex_params=cp_full)
+
+                st.markdown(f"**推荐点胶位置：{best_start:.0f} – {best_end:.0f} mm**（最大斜率 {best_slope:.3f} N·mm²/mm）")
+
+                fig_stiff, axes_stiff = plt.subplots(3, 1, figsize=(11, 12))
+                axes_stiff[0].plot(x, EI_o, label='Original', color='blue', linewidth=2)
+                axes_stiff[0].plot(x, EI_s, label='Smooth (hypo+core)', color='orange', linestyle='--', linewidth=2)
+                axes_stiff[0].plot(x, EI_op, label='Optimized (glue + spring)', color='green', linestyle='-.', linewidth=2)
+                axes_stiff[0].set_ylabel('Bending stiffness EI (N·mm²)'); axes_stiff[0].grid(True); axes_stiff[0].legend()
+                axes_stiff[0].set_title(f"{ver['name']} - Bending stiffness")
+
+                axes_stiff[1].plot(x, GJ_o, label='Original', color='blue', linewidth=2)
+                axes_stiff[1].plot(x, GJ_s, label='Smooth (hypo+core)', color='orange', linestyle='--', linewidth=2)
+                axes_stiff[1].plot(x, GJ_op, label='Optimized', color='green', linestyle='-.', linewidth=2)
+                axes_stiff[1].set_ylabel('Torsional stiffness GJ (N·mm²)'); axes_stiff[1].grid(True); axes_stiff[1].legend()
+                axes_stiff[1].set_xlim(0, 200)
+
+                axes_stiff[2].plot(x, EA_o, label='Original', color='blue', linewidth=2)
+                axes_stiff[2].plot(x, EA_s, label='Smooth (hypo+core)', color='orange', linestyle='--', linewidth=2)
+                axes_stiff[2].plot(x, EA_op, label='Optimized', color='green', linestyle='-.', linewidth=2)
+                axes_stiff[2].set_ylabel('Axial stiffness EA (N)'); axes_stiff[2].set_xlabel('Distance from distal end (mm)')
+                axes_stiff[2].grid(True); axes_stiff[2].legend()
+                st.pyplot(fig_stiff)
+
+                fig_def, axes_def = plt.subplots(2, 1, figsize=(11, 7))
+                axes_def[0].plot(x, y_o, label='Original', color='blue', linewidth=2)
+                axes_def[0].plot(x, y_s, label='Smooth (hypo+core)', color='orange', linestyle='--', linewidth=2)
+                axes_def[0].plot(x, y_op, label='Optimized', color='green', linestyle='-.', linewidth=2)
+                axes_def[0].set_ylabel('Deflection (mm)'); axes_def[0].grid(True); axes_def[0].legend()
+                axes_def[1].plot(x, phi_o, label='Original', color='blue', linewidth=2)
+                axes_def[1].plot(x, phi_s, label='Smooth (hypo+core)', color='orange', linestyle='--', linewidth=2)
+                axes_def[1].plot(x, phi_op, label='Optimized', color='green', linestyle='-.', linewidth=2)
+                axes_def[1].set_ylabel('Twist angle (rad)'); axes_def[1].set_xlabel('Distance from distal end (mm)')
+                axes_def[1].grid(True); axes_def[1].legend()
+                st.pyplot(fig_def)
+
+                fig_eta, ax_eta = plt.subplots(1, 1, figsize=(11, 4))
+                x_eta = np.linspace(0, 200, 500)
+                eta_o_list = []
+                eta_op_list = []
+                for xi in x_eta:
+                    if xi <= 1: eo = 1.0
+                    elif ver['spring_start'] <= xi < ver['spring_end']: eo = ver['eta']['spring_t']
+                    else: eo = ver['eta']['no_spring_t']
+                    for g in ver['glue_intervals']:
+                        if g[0] <= xi < g[1]: eo = ver['eta']['core_spring_t'] if g[2]=='core_spring' else ver['eta']['full_t']
+                    eta_o_list.append(eo)
+                    et = eta_t_spring(xi, glue_opt,
+                        cp_full['x_stretch_start'], cp_full['x_coil_end'],
+                        cp_full['p_start'], cp_full['p_end'],
+                        ver['eta']['spring_t'], cp_full['eta_glue_peak'],
+                        cp_full.get('pitch_mode','constant'), cp_full.get('n_segments',3))
+                    eta_op_list.append(et)
+                ax_eta.plot(x_eta, eta_o_list, label='Original', color='blue', linewidth=2)
+                ax_eta.plot(x_eta, eta_op_list, label='Optimized', color='green', linestyle='-.', linewidth=2)
+                ax_eta.set_ylabel('Transfer coefficient η_t')
+                ax_eta.set_xlabel('Distance from distal end (mm)')
+                ax_eta.grid(True); ax_eta.legend()
+                ax_eta.set_xlim(0, 200)
+                st.pyplot(fig_eta)
+                st.divider()
+
+    # ========== 自动推荐点胶位置 ==========
     if st.button("自动推荐最优方案"):
         if not st.session_state.saved_versions:
             st.warning("请先保存版本")
         else:
             st.markdown("### 自动扫描点胶位置并推荐最优方案")
-            glue_length = st.slider("点胶长度 (mm)", min_value=3.0, max_value=20.0, value=10.0, step=1.0, key="glue_length_slider")
+            glue_length = st.number_input("点胶长度 (mm)", min_value=1.0, max_value=50.0, value=10.0, step=0.5, key="glue_length_input_2")
 
             for ver in st.session_state.saved_versions:
                 st.subheader(ver['name'])
                 cp = ver.get('complex_params', {})
                 pitch_mode = cp.get('pitch_mode', 'constant')
                 mode_name = {'constant':'恒定螺距','segmented':'分段螺距','gradient':'平滑渐变'}[pitch_mode]
-                st.write(f"当前弹簧圈螺距模式：**{mode_name}**")
+                st.write(f"弹簧圈螺距模式：**{mode_name}**")
 
                 with st.spinner(f"正在扫描 {ver['name']} 的点胶位置..."):
                     best_start, best_end, best_slope, results = find_best_glue_position(
@@ -574,20 +757,16 @@ else:
                 base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
                 cp_full = {**cp, 'eta_glue_peak': 0.90}
 
-                # 原版
                 base_glue_orig = [(0, 1, 'full')]
                 for g in ver['glue_intervals']:
-                    if g[0] > 1 and g[0] <= 200:
-                        base_glue_orig.append(g)
+                    if g[0] > 1 and g[0] <= 200: base_glue_orig.append(g)
                 for g in ver['glue_intervals']:
                     if g[0] > 200: base_glue_orig.append(g)
                 params_orig = dict(base_params); params_orig['glue_intervals'] = base_glue_orig
                 _, GJ_orig, _, _, _, _, y_orig, phi_orig = compute_version(
                     x, ver['core_df'], ver['hypo_segments'], params_orig, ver['eta'],
-                    smooth=True, spring_enabled=True, complex_params=cp_full
-                )
+                    smooth=True, spring_enabled=True, complex_params=cp_full)
 
-                # 推荐版
                 base_glue_best = [(0, 1, 'full')]
                 for g in ver['glue_intervals']:
                     if g[0] > 200: base_glue_best.append(g)
@@ -595,15 +774,13 @@ else:
                 params_best = dict(base_params); params_best['glue_intervals'] = base_glue_best
                 _, GJ_best, _, _, _, _, y_best, phi_best = compute_version(
                     x, ver['core_df'], ver['hypo_segments'], params_best, ver['eta'],
-                    smooth=True, spring_enabled=True, complex_params=cp_full
-                )
+                    smooth=True, spring_enabled=True, complex_params=cp_full)
 
                 fig, axes = plt.subplots(2, 1, figsize=(11, 8))
                 axes[0].plot(x, GJ_orig, label='Original', color='blue', linewidth=2)
                 axes[0].plot(x, GJ_best, label=f'Recommended: {best_start:.0f}-{best_end:.0f} mm', color='green', linestyle='--', linewidth=2)
                 axes[0].set_ylabel('Torsional stiffness GJ (N·mm²)')
                 axes[0].grid(True); axes[0].legend()
-                axes[0].set_title(f"{ver['name']} - Torsional stiffness")
                 axes[0].set_xlim(0, 200)
                 axes[1].plot(x, phi_orig, label='Original', color='blue', linewidth=2)
                 axes[1].plot(x, phi_best, label='Recommended', color='green', linestyle='--', linewidth=2)
@@ -612,30 +789,4 @@ else:
                 axes[1].grid(True); axes[1].legend()
                 axes[1].set_xlim(0, 200)
                 st.pyplot(fig)
-
-                fig_eta, ax_eta = plt.subplots(1, 1, figsize=(11, 4))
-                x_eta = np.linspace(0, 200, 500)
-                eta_orig_list = []
-                eta_best_list = []
-                for xi in x_eta:
-                    et_o = eta_t_spring(xi, base_glue_orig,
-                        cp_full['x_stretch_start'], cp_full['x_coil_end'],
-                        cp_full['p_start'], cp_full['p_end'],
-                        ver['eta']['spring_t'], cp_full['eta_glue_peak'],
-                        cp_full.get('pitch_mode','constant'), cp_full.get('n_segments',3))
-                    eta_orig_list.append(et_o)
-                    et_b = eta_t_spring(xi, base_glue_best,
-                        cp_full['x_stretch_start'], cp_full['x_coil_end'],
-                        cp_full['p_start'], cp_full['p_end'],
-                        ver['eta']['spring_t'], cp_full['eta_glue_peak'],
-                        cp_full.get('pitch_mode','constant'), cp_full.get('n_segments',3))
-                    eta_best_list.append(et_b)
-                ax_eta.plot(x_eta, eta_orig_list, label='Original', color='blue', linewidth=2)
-                ax_eta.plot(x_eta, eta_best_list, label='Recommended', color='green', linestyle='--', linewidth=2)
-                ax_eta.set_ylabel('Transfer coefficient η_t')
-                ax_eta.set_xlabel('Distance from distal end (mm)')
-                ax_eta.grid(True); ax_eta.legend()
-                ax_eta.set_title(f"{ver['name']} - Transfer coefficient")
-                ax_eta.set_xlim(0, 200)
-                st.pyplot(fig_eta)
                 st.divider()
