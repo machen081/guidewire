@@ -231,10 +231,6 @@ def generate_suggestions(ver):
 
 # ==================== 自动推荐点胶位置（与平滑趋势偏差最小） ====================
 def find_best_glue_position(ver, glue_length=5.0, search_start=80.0, step=0.5):
-    """
-    评分：点胶后曲线与"局部平滑趋势"的最大偏差。
-    偏差越小，说明点胶融入原有趋势，突变越少。
-    """
     x = np.linspace(0, ver['L_total'], 1500)
     x_coil = ver.get('spring_end', 120.0)
     search_end = ver['L_total'] - glue_length
@@ -246,12 +242,10 @@ def find_best_glue_position(ver, glue_length=5.0, search_start=80.0, step=0.5):
         if g[0] > 200: base_glue.append(g)
 
     def smooth_trend(GJ, window_mm=10.0):
-        """用移动平均估计局部趋势"""
         w = max(3, int(window_mm / dx))
         kernel = np.ones(w) / w
         GJ_pad = np.pad(GJ, w//2, mode='edge')
         trend = np.convolve(GJ_pad, kernel, mode='valid')
-        # 截断到原长度
         if len(trend) > len(GJ):
             trend = trend[:len(GJ)]
         elif len(trend) < len(GJ):
@@ -268,20 +262,13 @@ def find_best_glue_position(ver, glue_length=5.0, search_start=80.0, step=0.5):
                 complex_params={**ver.get('complex_params', {}), 'eta_glue_peak': 0.90}
             )
             GJ = res[1]
-
-            # 用较大窗口估计"应该有的平滑趋势"
             GJ_trend = smooth_trend(GJ, window_mm=10.0)
-
-            # 计算点胶区及其邻近区域内的偏差
             margin = 3.0
             mask = (x >= gs - margin) & (x <= ge + margin)
             deviation = np.abs(GJ[mask] - GJ_trend[mask])
             max_dev = np.max(deviation) if len(deviation) > 0 else 0
-
-            # 额外：点胶区附近最大斜率
             dGJ = np.gradient(GJ, x)
             max_slope = np.abs(dGJ[mask]).max() if np.any(mask) else 0
-
             score = max_dev + 0.1 * max_slope
             return (gs, ge, max_dev, max_slope, score)
         except Exception:
@@ -322,18 +309,19 @@ def find_best_glue_position(ver, glue_length=5.0, search_start=80.0, step=0.5):
     return None, None, None, [], 'none'
 
 def get_recommended_glue_position(ver, glue_length=5.0):
+    """
+    Version 1 从 82 mm 起搜索，排除 80-82 区段。
+    其他版本仍从 80 mm 起。
+    """
     name = ver.get('name', '')
-    x_coil = ver.get('spring_end', 120.0)
-
     is_version1 = ('Version 1' in name) or ('版本一' in name)
-    is_5mm = abs(glue_length - 5.0) < 1e-6
-    fixed_ok = (92.5 <= x_coil)
 
-    if is_version1 and is_5mm and fixed_ok:
-        fixed_start = 87.5; fixed_end = 92.5
-        return fixed_start, fixed_end, 0.0, [(fixed_start, fixed_end, 0.0, 0.0, 0.0)], 'fixed'
+    if is_version1:
+        search_start = 82.0
     else:
-        return find_best_glue_position(ver, glue_length=glue_length, search_start=80.0, step=0.5)
+        search_start = 80.0
+
+    return find_best_glue_position(ver, glue_length=glue_length, search_start=search_start, step=0.5)
 
 # ==================== 默认数据 ====================
 default_core_v1 = pd.DataFrame([
@@ -693,10 +681,10 @@ else:
                         gs, ge, max_dev, max_slope, sc = r
                         st.write(f"{i+1}. {gs:.1f}–{ge:.1f} mm，偏差 {max_dev:.4f}，最大斜率 {max_slope:.4f}，总分 {sc:.4f}")
 
-                    st.markdown("**诊断：87–95 mm 区间候选评分：**")
+                    st.markdown("**诊断：82–100 mm 区间候选评分：**")
                     for r in results:
                         gs, ge, max_dev, max_slope, sc = r
-                        if 87.0 <= gs <= 95.0:
+                        if 82.0 <= gs <= 100.0:
                             st.write(f"{gs:.1f}–{ge:.1f} mm，偏差 {max_dev:.4f}，最大斜率 {max_slope:.4f}，总分 {sc:.4f}")
 
                 cp_full = {**cp, 'eta_glue_peak': 0.90}
