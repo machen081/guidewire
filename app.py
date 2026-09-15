@@ -229,28 +229,21 @@ def generate_suggestions(ver):
             break
     return suggestions
 
-# ==================== 自动推荐点胶位置（与平滑趋势偏差最小） ====================
-def find_best_glue_position(ver, glue_length=5.0, search_start=80.0, step=0.5):
+# ==================== 自动推荐点胶位置（70-110mm区间局部最大斜率最小） ====================
+def find_best_glue_position(ver, glue_length=5.0, search_start=70.0, step=0.5):
+    """
+    评分：70-110 mm 区间内的局部最大斜率（重点覆盖 90 mm 海波管分段边界）
+         + 0.3 × 全局最大斜率（辅助）。
+    该评分能识别"用点胶台阶抵消天然突变"的位置。
+    """
     x = np.linspace(0, ver['L_total'], 1500)
     x_coil = ver.get('spring_end', 120.0)
     search_end = ver['L_total'] - glue_length
-    dx = x[1] - x[0]
 
     base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
     base_glue = [(0, 1, 'full')]
     for g in ver['glue_intervals']:
         if g[0] > 200: base_glue.append(g)
-
-    def smooth_trend(GJ, window_mm=10.0):
-        w = max(3, int(window_mm / dx))
-        kernel = np.ones(w) / w
-        GJ_pad = np.pad(GJ, w//2, mode='edge')
-        trend = np.convolve(GJ_pad, kernel, mode='valid')
-        if len(trend) > len(GJ):
-            trend = trend[:len(GJ)]
-        elif len(trend) < len(GJ):
-            trend = np.pad(trend, (0, len(GJ) - len(trend)), mode='edge')
-        return trend
 
     def evaluate(gs, ge):
         test_glue = list(base_glue) + [(gs, ge, 'core_spring')]
@@ -262,15 +255,17 @@ def find_best_glue_position(ver, glue_length=5.0, search_start=80.0, step=0.5):
                 complex_params={**ver.get('complex_params', {}), 'eta_glue_peak': 0.90}
             )
             GJ = res[1]
-            GJ_trend = smooth_trend(GJ, window_mm=10.0)
-            margin = 3.0
-            mask = (x >= gs - margin) & (x <= ge + margin)
-            deviation = np.abs(GJ[mask] - GJ_trend[mask])
-            max_dev = np.max(deviation) if len(deviation) > 0 else 0
-            dGJ = np.gradient(GJ, x)
-            max_slope = np.abs(dGJ[mask]).max() if np.any(mask) else 0
-            score = max_dev + 0.1 * max_slope
-            return (gs, ge, max_dev, max_slope, score)
+            dGJ = np.abs(np.gradient(GJ, x))
+
+            # 70-110 mm 区间局部最大斜率（覆盖 90 mm 分段边界）
+            mask_local = (x >= 70) & (x <= 110)
+            max_slope_local = np.max(dGJ[mask_local]) if np.any(mask_local) else np.max(dGJ)
+
+            # 全局最大斜率
+            max_slope_global = np.max(dGJ)
+
+            score = max_slope_local + 0.3 * max_slope_global
+            return (gs, ge, max_slope_local, max_slope_global, score)
         except Exception:
             return None
 
@@ -310,14 +305,14 @@ def find_best_glue_position(ver, glue_length=5.0, search_start=80.0, step=0.5):
 
 def get_recommended_glue_position(ver, glue_length=5.0):
     """
-    Version 1 从 82 mm 起搜索，排除 80-82 区段。
+    Version 1 从 70 mm 起搜（允许覆盖 90 mm 分段边界）。
     其他版本仍从 80 mm 起。
     """
     name = ver.get('name', '')
     is_version1 = ('Version 1' in name) or ('版本一' in name)
 
     if is_version1:
-        search_start = 82.0
+        search_start = 70.0
     else:
         search_start = 80.0
 
@@ -648,7 +643,7 @@ else:
                 st.pyplot(fig_def)
                 st.divider()
 
-                st.markdown("### 自动推荐点胶位置（目标：与平滑趋势偏差最小）")
+                st.markdown("### 自动推荐点胶位置（目标：70–110 mm 区间内最大斜率最小）")
                 cp = ver.get('complex_params', {})
                 x_coil = ver.get('spring_end', 120.0)
                 st.write(f"弹簧圈末端：**{x_coil:.0f} mm**　|　螺距：**{cp.get('pitch', P_REF):.4f} mm**　|　点胶长度：**{glue_length:.1f} mm**")
@@ -673,19 +668,19 @@ else:
                 elif level == 'warning': st.warning(msg)
                 elif level == 'info': st.info(msg)
 
-                st.markdown(f"**推荐点胶位置：{best_start:.1f} – {best_end:.1f} mm**（与趋势偏差 {best_score:.4f}）")
+                st.markdown(f"**推荐点胶位置：{best_start:.1f} – {best_end:.1f} mm**（70–110 mm 局部最大斜率 {best_score:.4f}）")
 
                 if len(results) > 1:
-                    st.markdown("**候选排名（前15，按与趋势偏差最小）：**")
+                    st.markdown("**候选排名（前15，按 70–110 mm 局部最大斜率最小）：**")
                     for i, r in enumerate(results[:15]):
-                        gs, ge, max_dev, max_slope, sc = r
-                        st.write(f"{i+1}. {gs:.1f}–{ge:.1f} mm，偏差 {max_dev:.4f}，最大斜率 {max_slope:.4f}，总分 {sc:.4f}")
+                        gs, ge, ms_local, ms_global, sc = r
+                        st.write(f"{i+1}. {gs:.1f}–{ge:.1f} mm，局部最大斜率 {ms_local:.4f}，全局最大斜率 {ms_global:.4f}，总分 {sc:.4f}")
 
-                    st.markdown("**诊断：82–100 mm 区间候选评分：**")
+                    st.markdown("**诊断：70–100 mm 区间候选评分：**")
                     for r in results:
-                        gs, ge, max_dev, max_slope, sc = r
-                        if 82.0 <= gs <= 100.0:
-                            st.write(f"{gs:.1f}–{ge:.1f} mm，偏差 {max_dev:.4f}，最大斜率 {max_slope:.4f}，总分 {sc:.4f}")
+                        gs, ge, ms_local, ms_global, sc = r
+                        if 70.0 <= gs <= 100.0:
+                            st.write(f"{gs:.1f}–{ge:.1f} mm，局部最大斜率 {ms_local:.4f}，全局 {ms_global:.4f}，总分 {sc:.4f}")
 
                 cp_full = {**cp, 'eta_glue_peak': 0.90}
 
