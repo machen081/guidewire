@@ -229,15 +229,21 @@ def generate_suggestions(ver):
             break
     return suggestions
 
-# ==================== 自动推荐点胶位置（必须覆盖指定点） ====================
-def find_best_glue_position(ver, glue_length=5.0, search_start=70.0, step=0.5, must_cover=None):
+# ==================== 自动推荐点胶位置（强制覆盖 89-91 mm） ====================
+def find_best_glue_position(ver, glue_length=5.0, search_start=70.0, step=0.5, must_cover_range=None):
+    """
+    must_cover_range: (lo, hi) 元组。如果给定，点胶区必须同时覆盖 lo 和 hi
+                      （即起点 gs ≤ lo 且终点 ge ≥ hi）。
+    """
     x = np.linspace(0, ver['L_total'], 1500)
     x_coil = ver.get('spring_end', 120.0)
     search_end = ver['L_total'] - glue_length
 
-    if must_cover is not None:
-        effective_start = max(search_start, must_cover - glue_length)
-        effective_end = min(search_end, must_cover)
+    if must_cover_range is not None:
+        lo, hi = must_cover_range
+        # gs ≤ lo 且 gs + glue_length ≥ hi  →  gs ∈ [hi - glue_length, lo]
+        effective_start = max(search_start, hi - glue_length)
+        effective_end = min(search_end, lo)
         if effective_start > effective_end:
             return None, None, None, [], 'none'
         scan_start = effective_start
@@ -280,8 +286,9 @@ def find_best_glue_position(ver, glue_length=5.0, search_start=70.0, step=0.5, m
             ge = gs + glue_length
             if ge > ver['L_total']:
                 continue
-            if must_cover is not None:
-                if not (gs <= must_cover <= ge):
+            if must_cover_range is not None:
+                lo, hi = must_cover_range
+                if not (gs <= lo and ge >= hi):
                     continue
             if not constraint_fn(gs, ge):
                 continue
@@ -315,10 +322,11 @@ def get_recommended_glue_position(ver, glue_length=5.0):
 
     if is_version1:
         return find_best_glue_position(ver, glue_length=glue_length,
-                                       search_start=70.0, step=0.5, must_cover=90.0)
+                                       search_start=70.0, step=0.5,
+                                       must_cover_range=(89.0, 91.0))
     else:
         return find_best_glue_position(ver, glue_length=glue_length,
-                                       search_start=80.0, step=0.5, must_cover=None)
+                                       search_start=80.0, step=0.5, must_cover_range=None)
 
 # ==================== 默认数据 ====================
 default_core_v1 = pd.DataFrame([
@@ -656,7 +664,7 @@ else:
                     )
 
                 if status == 'none' or best_start is None:
-                    st.error("无法找到可行位置（可能点胶长度过大，无法覆盖 90 mm）。")
+                    st.error("无法找到可行位置（可能点胶长度太小，无法覆盖 89-91 mm）。")
                     st.divider()
                     continue
 
