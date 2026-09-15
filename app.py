@@ -229,16 +229,27 @@ def generate_suggestions(ver):
             break
     return suggestions
 
-# ==================== 自动推荐点胶位置（70-110mm区间局部最大斜率最小） ====================
-def find_best_glue_position(ver, glue_length=5.0, search_start=70.0, step=0.5):
+# ==================== 自动推荐点胶位置（必须覆盖指定点） ====================
+def find_best_glue_position(ver, glue_length=5.0, search_start=70.0, step=0.5, must_cover=None):
     """
-    评分：70-110 mm 区间内的局部最大斜率（重点覆盖 90 mm 海波管分段边界）
-         + 0.3 × 全局最大斜率（辅助）。
-    该评分能识别"用点胶台阶抵消天然突变"的位置。
+    评分：70-110 mm 区间内的局部最大斜率 + 0.3 × 全局最大斜率。
+    must_cover: 如果给定，则只扫描覆盖该点的候选位置。
     """
     x = np.linspace(0, ver['L_total'], 1500)
     x_coil = ver.get('spring_end', 120.0)
     search_end = ver['L_total'] - glue_length
+
+    # 如果必须覆盖某个点，调整搜索范围
+    if must_cover is not None:
+        effective_start = max(search_start, must_cover - glue_length)
+        effective_end = min(search_end, must_cover)
+        if effective_start > effective_end:
+            return None, None, None, [], 'none'
+        scan_start = effective_start
+        scan_end = effective_end
+    else:
+        scan_start = search_start
+        scan_end = search_end
 
     base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
     base_glue = [(0, 1, 'full')]
@@ -257,11 +268,8 @@ def find_best_glue_position(ver, glue_length=5.0, search_start=70.0, step=0.5):
             GJ = res[1]
             dGJ = np.abs(np.gradient(GJ, x))
 
-            # 70-110 mm 区间局部最大斜率（覆盖 90 mm 分段边界）
             mask_local = (x >= 70) & (x <= 110)
             max_slope_local = np.max(dGJ[mask_local]) if np.any(mask_local) else np.max(dGJ)
-
-            # 全局最大斜率
             max_slope_global = np.max(dGJ)
 
             score = max_slope_local + 0.3 * max_slope_global
@@ -271,12 +279,15 @@ def find_best_glue_position(ver, glue_length=5.0, search_start=70.0, step=0.5):
 
     def scan(constraint_fn):
         results = []
-        if search_end <= search_start:
+        if scan_end < scan_start:
             return results
-        for gs in np.arange(search_start, search_end + step, step):
+        for gs in np.arange(scan_start, scan_end + step, step):
             ge = gs + glue_length
             if ge > ver['L_total']:
                 continue
+            if must_cover is not None:
+                if not (gs <= must_cover <= ge):
+                    continue
             if not constraint_fn(gs, ge):
                 continue
             r = evaluate(gs, ge)
@@ -305,18 +316,18 @@ def find_best_glue_position(ver, glue_length=5.0, search_start=70.0, step=0.5):
 
 def get_recommended_glue_position(ver, glue_length=5.0):
     """
-    Version 1 从 70 mm 起搜（允许覆盖 90 mm 分段边界）。
-    其他版本仍从 80 mm 起。
+    Version 1 强制要求点胶区覆盖 90 mm。
+    其他版本从 80 mm 起自由搜索。
     """
     name = ver.get('name', '')
     is_version1 = ('Version 1' in name) or ('版本一' in name)
 
     if is_version1:
-        search_start = 70.0
+        return find_best_glue_position(ver, glue_length=glue_length,
+                                       search_start=70.0, step=0.5, must_cover=90.0)
     else:
-        search_start = 80.0
-
-    return find_best_glue_position(ver, glue_length=glue_length, search_start=search_start, step=0.5)
+        return find_best_glue_position(ver, glue_length=glue_length,
+                                       search_start=80.0, step=0.5, must_cover=None)
 
 # ==================== 默认数据 ====================
 default_core_v1 = pd.DataFrame([
@@ -646,6 +657,9 @@ else:
                 st.markdown("### 自动推荐点胶位置（目标：70–110 mm 区间内最大斜率最小）")
                 cp = ver.get('complex_params', {})
                 x_coil = ver.get('spring_end', 120.0)
+                is_v1 = ('Version 1' in ver['name']) or ('版本一' in ver['name'])
+                if is_v1:
+                    st.warning("Version 1：点胶区强制覆盖 90 mm。")
                 st.write(f"弹簧圈末端：**{x_coil:.0f} mm**　|　螺距：**{cp.get('pitch', P_REF):.4f} mm**　|　点胶长度：**{glue_length:.1f} mm**")
 
                 with st.spinner(f"正在扫描 {ver['name']} 的推荐点胶位置..."):
@@ -654,7 +668,7 @@ else:
                     )
 
                 if status == 'none' or best_start is None:
-                    st.error("无法找到任何可行位置。")
+                    st.error("无法找到可行位置（可能点胶长度过大，无法覆盖 90 mm）。")
                     st.divider()
                     continue
 
@@ -671,16 +685,10 @@ else:
                 st.markdown(f"**推荐点胶位置：{best_start:.1f} – {best_end:.1f} mm**（70–110 mm 局部最大斜率 {best_score:.4f}）")
 
                 if len(results) > 1:
-                    st.markdown("**候选排名（前15，按 70–110 mm 局部最大斜率最小）：**")
+                    st.markdown("**候选排名（按 70–110 mm 局部最大斜率最小）：**")
                     for i, r in enumerate(results[:15]):
                         gs, ge, ms_local, ms_global, sc = r
                         st.write(f"{i+1}. {gs:.1f}–{ge:.1f} mm，局部最大斜率 {ms_local:.4f}，全局最大斜率 {ms_global:.4f}，总分 {sc:.4f}")
-
-                    st.markdown("**诊断：70–100 mm 区间候选评分：**")
-                    for r in results:
-                        gs, ge, ms_local, ms_global, sc = r
-                        if 70.0 <= gs <= 100.0:
-                            st.write(f"{gs:.1f}–{ge:.1f} mm，局部最大斜率 {ms_local:.4f}，全局 {ms_global:.4f}，总分 {sc:.4f}")
 
                 cp_full = {**cp, 'eta_glue_peak': 0.90}
 
@@ -706,11 +714,13 @@ else:
                 fig, axes = plt.subplots(2, 1, figsize=(11, 8))
                 axes[0].plot(x, GJ_orig, label='Original', color='blue', linewidth=2)
                 axes[0].plot(x, GJ_best, label=f'Recommended: {best_start:.1f}-{best_end:.1f} mm', color='green', linestyle='--', linewidth=2)
+                axes[0].axvline(90, color='red', linestyle=':', alpha=0.4, label='90 mm')
                 axes[0].set_ylabel('Torsional stiffness GJ (N·mm²)')
                 axes[0].grid(True); axes[0].legend()
                 axes[0].set_xlim(0, 200)
                 axes[1].plot(x, phi_orig, label='Original', color='blue', linewidth=2)
                 axes[1].plot(x, phi_best, label='Recommended', color='green', linestyle='--', linewidth=2)
+                axes[1].axvline(90, color='red', linestyle=':', alpha=0.4)
                 axes[1].set_ylabel('Twist angle (rad)')
                 axes[1].set_xlabel('Distance from distal end (mm)')
                 axes[1].grid(True); axes[1].legend()
@@ -723,6 +733,7 @@ else:
                 axes_ft.plot(x, rt_best, label='Recommended', color='green', linestyle='--', linewidth=2)
                 axes_ft.axvline(best_start, color='green', linestyle=':', alpha=0.5)
                 axes_ft.axvline(best_end, color='green', linestyle=':', alpha=0.5)
+                axes_ft.axvline(90, color='red', linestyle=':', alpha=0.4)
                 axes_ft.set_ylabel('T_hypo / T_total')
                 axes_ft.set_xlabel('Distance from distal end (mm)')
                 axes_ft.grid(True); axes_ft.legend()
