@@ -616,7 +616,6 @@ with st.expander("📖 使用流程说明（点击展开）", expanded=False):
 
 - **局部区间**：70–110 mm（重点覆盖海波管分段边界 90 mm）。
 - **评分**：\(\text{score} = \max|\frac{dGJ}{dx}|_{\text{local}} + 0.3 \times \max|\frac{dGJ}{dx}|_{\text{global}}\)。
-- **Version 1 特殊约束**：强制要求点胶区同时覆盖 89 mm 和 91 mm，即起点 ≤ 89，终点 ≥ 91。5 mm 点胶长度对应的候选起点为 86.0–89.0 mm。
 
 ### 十、使用建议
 
