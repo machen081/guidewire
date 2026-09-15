@@ -229,28 +229,28 @@ def generate_suggestions(ver):
             break
     return suggestions
 
-# ==================== 自动推荐点胶位置（与平滑趋势偏差最小） ====================
-def find_best_glue_position(ver, glue_length=5.0, search_start=80.0, step=0.5):
+# ==================== 自动推荐点胶位置 ====================
+def find_best_glue_position(ver, glue_length=5.0, search_start=70.0, step=0.5, must_cover_range=None):
     x = np.linspace(0, ver['L_total'], 1500)
     x_coil = ver.get('spring_end', 120.0)
     search_end = ver['L_total'] - glue_length
-    dx = x[1] - x[0]
+
+    if must_cover_range is not None:
+        lo, hi = must_cover_range
+        effective_start = max(search_start, hi - glue_length)
+        effective_end = min(search_end, lo)
+        if effective_start > effective_end:
+            return None, None, None, [], 'none'
+        scan_start = effective_start
+        scan_end = effective_end
+    else:
+        scan_start = search_start
+        scan_end = search_end
 
     base_params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end']}
     base_glue = [(0, 1, 'full')]
     for g in ver['glue_intervals']:
         if g[0] > 200: base_glue.append(g)
-
-    def smooth_trend(GJ, window_mm=10.0):
-        w = max(3, int(window_mm / dx))
-        kernel = np.ones(w) / w
-        GJ_pad = np.pad(GJ, w//2, mode='edge')
-        trend = np.convolve(GJ_pad, kernel, mode='valid')
-        if len(trend) > len(GJ):
-            trend = trend[:len(GJ)]
-        elif len(trend) < len(GJ):
-            trend = np.pad(trend, (0, len(GJ) - len(trend)), mode='edge')
-        return trend
 
     def evaluate(gs, ge):
         test_glue = list(base_glue) + [(gs, ge, 'core_spring')]
@@ -262,26 +262,29 @@ def find_best_glue_position(ver, glue_length=5.0, search_start=80.0, step=0.5):
                 complex_params={**ver.get('complex_params', {}), 'eta_glue_peak': 0.90}
             )
             GJ = res[1]
-            GJ_trend = smooth_trend(GJ, window_mm=10.0)
-            margin = 3.0
-            mask = (x >= gs - margin) & (x <= ge + margin)
-            deviation = np.abs(GJ[mask] - GJ_trend[mask])
-            max_dev = np.max(deviation) if len(deviation) > 0 else 0
-            dGJ = np.gradient(GJ, x)
-            max_slope = np.abs(dGJ[mask]).max() if np.any(mask) else 0
-            score = max_dev + 0.1 * max_slope
-            return (gs, ge, max_dev, max_slope, score)
+            dGJ = np.abs(np.gradient(GJ, x))
+
+            mask_local = (x >= 70) & (x <= 110)
+            max_slope_local = np.max(dGJ[mask_local]) if np.any(mask_local) else np.max(dGJ)
+            max_slope_global = np.max(dGJ)
+
+            score = max_slope_local + 0.3 * max_slope_global
+            return (gs, ge, max_slope_local, max_slope_global, score)
         except Exception:
             return None
 
     def scan(constraint_fn):
         results = []
-        if search_end <= search_start:
+        if scan_end < scan_start:
             return results
-        for gs in np.arange(search_start, search_end + step, step):
+        for gs in np.arange(scan_start, scan_end + step, step):
             ge = gs + glue_length
             if ge > ver['L_total']:
                 continue
+            if must_cover_range is not None:
+                lo, hi = must_cover_range
+                if not (gs <= lo and ge >= hi):
+                    continue
             if not constraint_fn(gs, ge):
                 continue
             r = evaluate(gs, ge)
@@ -309,19 +312,16 @@ def find_best_glue_position(ver, glue_length=5.0, search_start=80.0, step=0.5):
     return None, None, None, [], 'none'
 
 def get_recommended_glue_position(ver, glue_length=5.0):
-    """
-    Version 1 的搜索起点提高到 85 mm，避免选到 80-85 区段。
-    其他版本仍从 80 mm 起。
-    """
     name = ver.get('name', '')
     is_version1 = ('Version 1' in name) or ('版本一' in name)
 
     if is_version1:
-        search_start = 85.0
+        return find_best_glue_position(ver, glue_length=glue_length,
+                                       search_start=70.0, step=0.5,
+                                       must_cover_range=(89.0, 91.0))
     else:
-        search_start = 80.0
-
-    return find_best_glue_position(ver, glue_length=glue_length, search_start=search_start, step=0.5)
+        return find_best_glue_position(ver, glue_length=glue_length,
+                                       search_start=80.0, step=0.5, must_cover_range=None)
 
 # ==================== 默认数据 ====================
 default_core_v1 = pd.DataFrame([
@@ -521,6 +521,113 @@ with st.sidebar:
         st.success(f"版本 '{version['name']}' 已保存")
 
 # ==================== 主区域 ====================
+st.header("Guidewire Multi-layer Stiffness Analysis")
+
+with st.expander("📖 使用流程说明（点击展开）", expanded=False):
+    st.markdown("""
+### 一、定义导丝结构
+
+本工具用于分析由**芯丝、弹簧圈、海波管、点胶区**组成的导丝，沿轴向的刚度、应力、变形分布。
+
+- **芯丝**：实心圆截面，用不锈钢材料，直径沿长度分段变化（线性过渡）。
+- **海波管**：镍钛材料，切割开槽，通过开槽参数折减等效刚度。
+- **弹簧圈**：通过机械互锁和点胶影响海波管与芯丝之间的扭矩传递。
+- **点胶区**：通过改变传递系数，局部增强或减弱扭矩/弯曲耦合。
+
+### 二、三种预设版本
+
+点击侧边栏顶部的三个按钮，可快速加载不同的设计方案：
+
+1. **Version 1 (Step)**：海波管开槽参数每 10 mm 阶梯变化。
+2. **Version 2 (Continuous)**：海波管 10–90 mm 连续多项式过渡。
+3. **Version 3 (New)**：新设计，弹簧圈、芯丝、海波管参数均不同。
+
+加载后可在侧边栏继续编辑任意参数。
+
+### 三、编辑当前版本参数
+
+侧边栏从上到下依次为：
+
+- **版本名称**：用于区分不同方案，也是图表中的图例。
+- **材料参数**：芯丝与海波管的杨氏模量、剪切模量。
+- **几何参数**：海波管外径、内径、槽宽、导丝总长。
+- **载荷参数**：远端横向力 \(F\)、近端扭矩 \(T_0\)。
+- **弹簧圈范围**：弹簧圈的起始和结束位置。
+- **弹簧圈螺距**：影响海波管与芯丝之间的扭矩传递。
+- **点胶区间**：格式为 `start,end,type`，每行一个区间。  
+  - `full`：芯丝+弹簧圈+海波管三者点胶；  
+  - `core_spring`：仅芯丝与弹簧圈点胶；  
+  - `core_hypo`：仅芯丝与海波管点胶。
+- **芯丝直径分段表**：每行格式 `start,end,d_start,d_end`，中间线性过渡。
+- **海波管开槽函数**：每行格式 `start,end,b_expr,Z_expr`，支持多项式表达式。
+- **传递系数**：按区域调整耦合强度，包括弯曲、扭转、轴向三项。
+
+### 四、保存版本
+
+点击侧边栏底部**“保存当前版本”**按钮，将当前参数存入已保存列表。  
+可保存多个版本，并在主区域勾选对比。
+
+### 五、生成对比曲线
+
+在主区域勾选两个或多个已保存版本，点击**“生成对比曲线”**，可得到：
+
+- **弯曲刚度 EI**：沿导丝长度分布；
+- **扭转刚度 GJ**：沿导丝长度分布；
+- **轴向刚度 EA**：沿导丝长度分布；
+- **海波管连接筋弯曲正应力**；
+- **海波管连接筋扭转剪切应力**；
+- **海波管连接筋 Von Mises 等效应力**；
+- **弯曲挠度**与**扭转角**。
+
+### 六、生成参数改进建议
+
+点击**“生成参数改进建议”**按钮，对每个已保存版本依次显示：
+
+1. **改进建议**：海波管分段突变、芯丝直径线性过渡等问题的量化建议。
+2. **原版 vs 平滑改进**：将海波管分段边界改用 Hermite 过渡、芯丝直径改用 S 形过渡，对比刚度和变形曲线。
+3. **自动推荐点胶位置**：
+   - 程序在 70–110 mm 范围内以 0.5 mm 步长扫描候选点胶位置；
+   - 评分指标为 70–110 mm 区间内的**最大斜率**（越小越平滑）；
+   - Version 1 强制要求点胶区覆盖 89–91 mm 区间；
+   - 候选排名和推荐的 5 mm 点胶区间会在界面上显示。
+4. **原版 vs 推荐版**：显示推荐点胶位置对扭转刚度、扭转角和力传递（海波管承担的扭矩比例）的影响。
+
+### 七、关键物理量解释
+
+| 物理量 | 含义 | 单位 |
+|--------|------|------|
+| \(EI\) | 弯曲刚度 | N·mm² |
+| \(GJ\) | 扭转刚度 | N·mm² |
+| \(EA\) | 轴向刚度 | N |
+| \(\eta_t\) | 扭转传递系数 | — |
+| \(T_{\text{hypo}}/T_{\text{total}}\) | 海波管承担的扭矩比例 | — |
+| 挠度 | 横向位移 | mm |
+| 扭转角 | 相对远端的累积扭转 | rad |
+
+### 八、传递系数的物理意义
+
+- **完全点胶区**：芯丝、弹簧圈、海波管三层粘接，扭矩完全共同传递，\(\eta = 1.0\)。
+- **芯丝+弹簧圈点胶**：弹簧圈与芯丝固定，海波管通过机械互锁部分传递，\(\eta \approx 0.9\)。
+- **有弹簧圈无点胶**：弹簧圈填充间隙，提供摩擦互锁，\(\eta \approx 0.6\)。
+- **无弹簧圈无点胶**：仅靠芯丝与海波管的直接摩擦，\(\eta \approx 0.35\)。
+- **螺距影响**：螺距越大，单位长度圈数越少，机械互锁越弱，\(\eta_t = \eta_{\text{base}} \times p_{\text{ref}} / p\)。
+
+### 九、推荐点胶位置的评分逻辑
+
+- **局部区间**：70–110 mm（重点覆盖海波管分段边界 90 mm）。
+- **评分**：\(\text{score} = \max|\frac{dGJ}{dx}|_{\text{local}} + 0.3 \times \max|\frac{dGJ}{dx}|_{\text{global}}\)。
+- **Version 1 特殊约束**：强制要求点胶区同时覆盖 89 mm 和 91 mm，即起点 ≤ 89，终点 ≥ 91。5 mm 点胶长度对应的候选起点为 86.0–89.0 mm。
+
+### 十、使用建议
+
+1. **先加载预设版本**，观察默认曲线。
+2. **调整参数**后点击“保存当前版本”，便于对比。
+3. **点击“生成参数改进建议”**，查看推荐的平滑方案和点胶位置。
+4. **在 70–110 mm 区间**重点观察扭转刚度的突变，以及推荐点胶位置对曲线的影响。
+5. 如需精确匹配实验结果，可调整传递系数、螺距、海波管开槽参数，反复对比。
+    """)
+
+# ==================== 已保存版本 ====================
 st.header("已保存版本")
 if not st.session_state.saved_versions:
     st.info("请在左侧编辑参数并点击“保存当前版本”。")
@@ -648,7 +755,7 @@ else:
                 st.pyplot(fig_def)
                 st.divider()
 
-                st.markdown("### 自动推荐点胶位置（目标：与平滑趋势偏差最小）")
+                st.markdown("### 自动推荐点胶位置（目标：70–110 mm 区间内最大斜率最小）")
                 cp = ver.get('complex_params', {})
                 x_coil = ver.get('spring_end', 120.0)
                 st.write(f"弹簧圈末端：**{x_coil:.0f} mm**　|　螺距：**{cp.get('pitch', P_REF):.4f} mm**　|　点胶长度：**{glue_length:.1f} mm**")
@@ -659,7 +766,7 @@ else:
                     )
 
                 if status == 'none' or best_start is None:
-                    st.error("无法找到任何可行位置。")
+                    st.error("无法找到可行位置（可能点胶长度太小，无法覆盖 89-91 mm）。")
                     st.divider()
                     continue
 
@@ -673,19 +780,13 @@ else:
                 elif level == 'warning': st.warning(msg)
                 elif level == 'info': st.info(msg)
 
-                st.markdown(f"**推荐点胶位置：{best_start:.1f} – {best_end:.1f} mm**（与趋势偏差 {best_score:.4f}）")
+                st.markdown(f"**推荐点胶位置：{best_start:.1f} – {best_end:.1f} mm**（70–110 mm 局部最大斜率 {best_score:.4f}）")
 
                 if len(results) > 1:
-                    st.markdown("**候选排名（前15，按与趋势偏差最小）：**")
+                    st.markdown("**候选排名（按 70–110 mm 局部最大斜率最小）：**")
                     for i, r in enumerate(results[:15]):
-                        gs, ge, max_dev, max_slope, sc = r
-                        st.write(f"{i+1}. {gs:.1f}–{ge:.1f} mm，偏差 {max_dev:.4f}，最大斜率 {max_slope:.4f}，总分 {sc:.4f}")
-
-                    st.markdown("**诊断：85–100 mm 区间候选评分：**")
-                    for r in results:
-                        gs, ge, max_dev, max_slope, sc = r
-                        if 85.0 <= gs <= 100.0:
-                            st.write(f"{gs:.1f}–{ge:.1f} mm，偏差 {max_dev:.4f}，最大斜率 {max_slope:.4f}，总分 {sc:.4f}")
+                        gs, ge, ms_local, ms_global, sc = r
+                        st.write(f"{i+1}. {gs:.1f}–{ge:.1f} mm，局部最大斜率 {ms_local:.4f}，全局最大斜率 {ms_global:.4f}，总分 {sc:.4f}")
 
                 cp_full = {**cp, 'eta_glue_peak': 0.90}
 
@@ -711,11 +812,13 @@ else:
                 fig, axes = plt.subplots(2, 1, figsize=(11, 8))
                 axes[0].plot(x, GJ_orig, label='Original', color='blue', linewidth=2)
                 axes[0].plot(x, GJ_best, label=f'Recommended: {best_start:.1f}-{best_end:.1f} mm', color='green', linestyle='--', linewidth=2)
+                axes[0].axvline(90, color='red', linestyle=':', alpha=0.4, label='90 mm')
                 axes[0].set_ylabel('Torsional stiffness GJ (N·mm²)')
                 axes[0].grid(True); axes[0].legend()
                 axes[0].set_xlim(0, 200)
                 axes[1].plot(x, phi_orig, label='Original', color='blue', linewidth=2)
                 axes[1].plot(x, phi_best, label='Recommended', color='green', linestyle='--', linewidth=2)
+                axes[1].axvline(90, color='red', linestyle=':', alpha=0.4)
                 axes[1].set_ylabel('Twist angle (rad)')
                 axes[1].set_xlabel('Distance from distal end (mm)')
                 axes[1].grid(True); axes[1].legend()
@@ -728,6 +831,7 @@ else:
                 axes_ft.plot(x, rt_best, label='Recommended', color='green', linestyle='--', linewidth=2)
                 axes_ft.axvline(best_start, color='green', linestyle=':', alpha=0.5)
                 axes_ft.axvline(best_end, color='green', linestyle=':', alpha=0.5)
+                axes_ft.axvline(90, color='red', linestyle=':', alpha=0.4)
                 axes_ft.set_ylabel('T_hypo / T_total')
                 axes_ft.set_xlabel('Distance from distal end (mm)')
                 axes_ft.grid(True); axes_ft.legend()
