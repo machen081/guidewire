@@ -231,15 +231,10 @@ def generate_suggestions(ver):
 
 # ==================== 自动推荐点胶位置（必须覆盖指定点） ====================
 def find_best_glue_position(ver, glue_length=5.0, search_start=70.0, step=0.5, must_cover=None):
-    """
-    评分：70-110 mm 区间内的局部最大斜率 + 0.3 × 全局最大斜率。
-    must_cover: 如果给定，则只扫描覆盖该点的候选位置。
-    """
     x = np.linspace(0, ver['L_total'], 1500)
     x_coil = ver.get('spring_end', 120.0)
     search_end = ver['L_total'] - glue_length
 
-    # 如果必须覆盖某个点，调整搜索范围
     if must_cover is not None:
         effective_start = max(search_start, must_cover - glue_length)
         effective_end = min(search_end, must_cover)
@@ -315,10 +310,6 @@ def find_best_glue_position(ver, glue_length=5.0, search_start=70.0, step=0.5, m
     return None, None, None, [], 'none'
 
 def get_recommended_glue_position(ver, glue_length=5.0):
-    """
-    Version 1 强制要求点胶区覆盖 90 mm。
-    其他版本从 80 mm 起自由搜索。
-    """
     name = ver.get('name', '')
     is_version1 = ('Version 1' in name) or ('版本一' in name)
 
@@ -657,9 +648,6 @@ else:
                 st.markdown("### 自动推荐点胶位置（目标：70–110 mm 区间内最大斜率最小）")
                 cp = ver.get('complex_params', {})
                 x_coil = ver.get('spring_end', 120.0)
-                is_v1 = ('Version 1' in ver['name']) or ('版本一' in ver['name'])
-                if is_v1:
-                    st.warning("Version 1：点胶区强制覆盖 90 mm。")
                 st.write(f"弹簧圈末端：**{x_coil:.0f} mm**　|　螺距：**{cp.get('pitch', P_REF):.4f} mm**　|　点胶长度：**{glue_length:.1f} mm**")
 
                 with st.spinner(f"正在扫描 {ver['name']} 的推荐点胶位置..."):
