@@ -11,12 +11,24 @@ P_REF = 0.045  # 参考螺距 mm
 
 # ==================== 安全表达式求值 ====================
 def safe_eval(expr, x_val):
-    import re
     allowed = set("0123456789+-*/(). xXeE")
     if any(ch not in allowed for ch in expr):
         raise ValueError(f"表达式包含非法字符: {expr}")
-    expr_sub = expr.replace('x', f'({x_val})')
+    expr_sub = expr.replace('X', 'x').replace('x', f'({x_val})')
     return float(eval(expr_sub))
+
+def safe_eval_array(expr, x_arr):
+    return np.array([safe_eval(expr, xi) for xi in x_arr], dtype=float)
+
+# ==================== 移动平均 ====================
+def moving_average(arr, window):
+    window = int(window)
+    if window < 1:
+        return np.asarray(arr, dtype=float).copy()
+    if window % 2 == 0:
+        window += 1
+    s = pd.Series(np.asarray(arr, dtype=float))
+    return s.rolling(window=window, center=True, min_periods=1).mean().to_numpy()
 
 # ==================== 海波管分段函数解析 ====================
 def parse_hypo_functions(text):
@@ -64,7 +76,7 @@ def calc_b_Z_smooth(x, segments, delta=2.0):
                         db_l = (safe_eval(prev_seg[2], boundary-eps) - safe_eval(prev_seg[2], boundary-2*eps))/eps
                         db_r = (safe_eval(next_seg[2], boundary+2*eps) - safe_eval(next_seg[2], boundary+eps))/eps
                         dZ_l = (safe_eval(prev_seg[3], boundary-eps) - safe_eval(prev_seg[3], boundary-2*eps))/eps
-                        dZ_r = (safe_eval(next_seg[3], boundary+2*eps) - safe_eval(next_seg[3], boundary+eps))/eps
+                        dZ_r = (safe_eval(next_seg[3], boundary+2*eps) - safe_eval(next_seg[3], boundary-eps))/eps
                         t = (x - (boundary-delta))/(2*delta)
                         h00 = 2*t**3-3*t**2+1; h10 = t**3-2*t**2+t
                         h01 = -2*t**3+3*t**2; h11 = t**3-t**2
@@ -106,7 +118,7 @@ def eta_t_constant(x, glue_intervals, eta_base, eta_glue_peak, pitch, p_ref=P_RE
             return eta_glue_peak
     return base
 
-# ==================== 计算函数 ====================
+# ==================== 计算函数（正问题） ====================
 def compute_version(x, core_df, hypo_segments, params, eta_global,
                     smooth=False, spring_enabled=False, complex_params=None):
     E_core = params['E_core']; G_core = params['G_core']
@@ -132,22 +144,17 @@ def compute_version(x, core_df, hypo_segments, params, eta_global,
             b_val, Z_val = calc_b_Z_original(xi, hypo_segments)
         b_arr[i] = b_val; Z_arr[i] = Z_val
 
-        # ==================== 弯曲传递系数（关键修改） ====================
-        # 未点胶区域：弯曲时芯丝与海波管可以独立弯曲，海波管贡献很弱
-        # 点胶区域：复合截面共同弯曲，海波管完全参与
         if 0 <= xi <= 1:
-            eta_b = 1.0          # 头端三者点胶
+            eta_b = 1.0
         elif 90 <= xi <= 100:
-            eta_b = 0.9          # 芯丝+弹簧圈点胶
+            eta_b = 0.9
         elif 345 <= xi <= 346:
-            eta_b = 1.0          # 芯丝+海波管点胶
+            eta_b = 1.0
         else:
             if 0 <= xi <= 150:
-                eta_b = 0.5      # 有弹簧圈无点胶
+                eta_b = 0.9
             else:
-                eta_b = 0.2      # 无弹簧圈无点胶
-        # 如果当前版本自定义了 eta，也可以覆盖（保留原逻辑用于对比）
-        # ================================================================
+                eta_b = 0.85
 
         eta_a = eta_global['no_spring_a']
         for g_start, g_end, g_type in glue_intervals:
@@ -177,10 +184,14 @@ def compute_version(x, core_df, hypo_segments, params, eta_global,
     GJ_core = G_core*np.pi*d_core_arr**4/32
     EA_core = E_core*np.pi*d_core_arr**2/4
 
-    Y = 0.5184 - b_arr; denom = Z_arr - w_s
-    denom_safe = np.where(denom > 0, denom, 1e-9)
-    k = 1.0/(1.0 + (w_s/denom_safe)*(Y/b_arr))
-    k = np.where(denom > 0, k, 1.0)
+    # --- 方案 A：Z 为轴向周期，k = 1/(1 + (w_s/Z)*(Y/b)) ---
+    Y = 0.5184 - b_arr
+    Z_safe = np.where(Z_arr > 0, Z_arr, 1e-9)
+    b_safe = np.where(b_arr > 0, b_arr, 1e-9)
+    k = 1.0 / (1.0 + (w_s / Z_safe) * (Y / b_safe))
+    k = np.where((Z_arr > 0) & (b_arr > 0) & (b_arr < 0.5184), k, np.nan)
+    k = np.clip(k, 0.0, 1.0)
+    k = np.nan_to_num(k, nan=0.0)  # 正问题中不合理位置海波管贡献置 0
 
     EI_hypo = k*EI0; GJ_hypo = k*GJ0; EA_hypo = k*EA0
     EI_total = EI_core + eta_b_arr*EI_hypo
@@ -387,12 +398,13 @@ eta_defaults = {
     'full_b':1.0,'full_t':1.0,'full_a':1.0,
     'core_spring_b':0.9,'core_spring_t':0.9,'core_spring_a':0.0,
     'core_hypo_b':1.0,'core_hypo_t':1.0,'core_hypo_a':1.0,
-    'spring_b':0.5,'spring_t':0.6,'spring_a':0.0,
-    'no_spring_b':0.2,'no_spring_t':0.35,'no_spring_a':0.0,
+    'spring_b':0.9,'spring_t':0.6,'spring_a':0.0,
+    'no_spring_b':0.85,'no_spring_t':0.35,'no_spring_a':0.0,
 }
 
 if 'name_input' not in st.session_state: st.session_state.name_input = "Version 1 (Step)"
-if 'core_editor' not in st.session_state: st.session_state.core_editor = default_core_v1.copy()
+if 'core_editor_data' not in st.session_state: st.session_state.core_editor_data = default_core_v1.copy()
+if 'core_editor_version' not in st.session_state: st.session_state.core_editor_version = 0
 if 'hypo_text_input' not in st.session_state: st.session_state.hypo_text_input = default_hypo_v1
 if 'spring_start_input' not in st.session_state: st.session_state.spring_start_input = 0
 if 'spring_end_input' not in st.session_state: st.session_state.spring_end_input = 150
@@ -405,35 +417,29 @@ for k in eta_keys:
 with st.sidebar:
     st.header("加载预设版本")
     col1, col2, col3 = st.columns(3)
+
+    def load_preset(name, core_df, hypo_text, s_start, s_end, glue, pitch):
+        st.session_state.name_input = name
+        st.session_state.core_editor_data = core_df.copy()
+        st.session_state.core_editor_version += 1
+        st.session_state.hypo_text_input = hypo_text
+        st.session_state.spring_start_input = s_start
+        st.session_state.spring_end_input = s_end
+        st.session_state.glue_input = glue
+        st.session_state.pitch_input = pitch
+        for kk in eta_keys: st.session_state[kk + '_input'] = eta_defaults[kk]
+
     if col1.button("版本一"):
-        st.session_state.name_input = "Version 1 (Step)"
-        st.session_state.core_editor = default_core_v1.copy()
-        st.session_state.hypo_text_input = default_hypo_v1
-        st.session_state.spring_start_input = 0
-        st.session_state.spring_end_input = 150
-        st.session_state.glue_input = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
-        st.session_state.pitch_input = 0.045
-        for k in eta_keys: st.session_state[k + '_input'] = eta_defaults[k]
+        load_preset("Version 1 (Step)", default_core_v1, default_hypo_v1, 0, 150,
+                    "0,1,full\n90,100,core_spring\n345,346,core_hypo", 0.045)
         st.rerun()
     if col2.button("版本二"):
-        st.session_state.name_input = "Version 2 (Continuous)"
-        st.session_state.core_editor = default_core_v1.copy()
-        st.session_state.hypo_text_input = default_hypo_v2
-        st.session_state.spring_start_input = 0
-        st.session_state.spring_end_input = 150
-        st.session_state.glue_input = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
-        st.session_state.pitch_input = 0.045
-        for k in eta_keys: st.session_state[k + '_input'] = eta_defaults[k]
+        load_preset("Version 2 (Continuous)", default_core_v1, default_hypo_v2, 0, 150,
+                    "0,1,full\n90,100,core_spring\n345,346,core_hypo", 0.045)
         st.rerun()
     if col3.button("版本三"):
-        st.session_state.name_input = "Version 3 (New)"
-        st.session_state.core_editor = default_core_v3.copy()
-        st.session_state.hypo_text_input = default_hypo_v3
-        st.session_state.spring_start_input = 0
-        st.session_state.spring_end_input = 120
-        st.session_state.glue_input = "0,1,full\n90,100,core_spring\n345,346,core_hypo"
-        st.session_state.pitch_input = 0.045
-        for k in eta_keys: st.session_state[k + '_input'] = eta_defaults[k]
+        load_preset("Version 3 (New)", default_core_v3, default_hypo_v3, 0, 120,
+                    "0,1,full\n90,100,core_spring\n345,346,core_hypo", 0.045)
         st.rerun()
 
     st.divider()
@@ -467,7 +473,12 @@ with st.sidebar:
     st.text_area("格式: start,end,type (每行一个)", key="glue_input")
 
     st.subheader("芯丝直径分段表")
-    st.data_editor(st.session_state.core_editor, num_rows="dynamic", key="core_editor_widget")
+    edited_core_df = st.data_editor(
+        st.session_state.core_editor_data,
+        num_rows="dynamic",
+        key=f"core_editor_widget_{st.session_state.core_editor_version}"
+    )
+    st.session_state.core_editor_data = edited_core_df
 
     st.subheader("海波管开槽函数")
     uploaded_file = st.file_uploader("上传 Excel/CSV (可选)", type=["xlsx","xls","csv"], key="file_uploader")
@@ -524,7 +535,7 @@ with st.sidebar:
             'D_o': D_o, 'D_i': D_i, 'w_s': w_s, 'L_total': L_total, 'F': F, 'T0': T0,
             'spring_start': spring_start, 'spring_end': spring_end,
             'glue_intervals': glue_intervals,
-            'core_df': st.session_state.core_editor.copy(),
+            'core_df': st.session_state.core_editor_data.copy(),
             'hypo_segments': hypo_segments,
             'eta': eta,
             'complex_params': {
@@ -540,101 +551,28 @@ st.header("Guidewire Multi-layer Stiffness Analysis")
 
 with st.expander("📖 使用流程说明（点击展开）", expanded=False):
     st.markdown("""
-### 一、定义导丝结构
+### 一、正问题：从几何参数算刚度
 
-本工具用于分析由**芯丝、弹簧圈、海波管、点胶区**组成的导丝，沿轴向的刚度、应力、变形分布。
+1. 在侧边栏编辑材料、几何、载荷、弹簧圈、点胶、芯丝、海波管、传递系数。
+2. 点击**“保存当前版本”**将参数存入列表。
+3. 勾选已保存版本，点击**“生成对比曲线”**查看刚度、应力、变形。
+4. 点击**“生成参数改进建议”**，查看平滑方案和推荐点胶位置。
 
-- **芯丝**：实心圆截面，不锈钢材料，直径沿长度分段变化（线性过渡）。
-- **海波管**：镍钛材料，切割开槽，通过开槽参数折减等效刚度。
-- **弹簧圈**：通过机械互锁和点胶影响海波管与芯丝之间的耦合。
-- **点胶区**：通过改变传递系数，局部增强或减弱耦合。
+### 二、反问题：从目标刚度反推几何参数
 
-### 二、三种预设版本
+支持 **EI、GJ、EA** 三种目标：
 
-点击侧边栏顶部的三个按钮，可快速加载不同设计方案：
+- **主导刚度**决定反解出的 b(x)；
+- 其他目标作为**一致性校验**：如果三个目标物理上不一致，会给出提示。
 
-1. **Version 1 (Step)**：海波管开槽参数每 10 mm 阶梯变化。
-2. **Version 2 (Continuous)**：海波管 10–90 mm 连续多项式过渡。
-3. **Version 3 (New)**：新设计，弹簧圈、芯丝、海波管参数均不同。
+### 三、物理约束
 
-### 三、弯曲传递系数（关键）
-
-**弯曲传递系数 \(\eta_{\text{bend}}\)** 表示海波管在弯曲中参与承载的比例：
-
-| 区域 | \(\eta_{\text{bend}}\) | 物理含义 |
-|------|------------------------|----------|
-| 完全点胶 | 1.0 | 芯丝+弹簧圈+海波管三层粘接，复合截面共同弯曲 |
-| 芯丝+弹簧圈点胶 | 0.9 | 弹簧圈固定，海波管部分跟随 |
-| 芯丝+海波管点胶 | 1.0 | 两层粘接，完全共同弯曲 |
-| 有弹簧圈无点胶 | 0.5 | 弹簧圈填充间隙，提供一定支撑和摩擦 |
-| 无弹簧圈无点胶 | 0.2 | 芯丝与海波管仅靠接触摩擦，几乎不耦合 |
-
-**弯曲时，未点胶区域芯丝与海波管可以相对滑动**，海波管的抗弯能力很难被芯丝调动，所以弯曲传递系数远低于扭转传递系数。
-
-### 四、扭转传递系数
-
-扭转时芯丝与海波管通过摩擦和机械互锁耦合，取值比弯曲高：
-
-| 区域 | \(\eta_{\text{tors}}\) |
-|------|------------------------|
-| 完全点胶 | 1.0 |
-| 芯丝+弹簧圈点胶 | 0.9 |
-| 有弹簧圈无点胶 | 0.6 |
-| 无弹簧圈无点胶 | 0.35 |
-
-螺距影响：\(\eta_t = \eta_{\text{base}} \times p_{\text{ref}} / p\)，螺距越大，耦合越弱。
-
-### 五、轴向传递系数
-
-轴向刚度主要靠芯丝，海波管只在点胶处才参与：
-
-| 区域 | \(\eta_{\text{axial}}\) |
-|------|-------------------------|
-| 完全点胶 | 1.0 |
-| 芯丝+海波管点胶 | 1.0 |
-| 其他区域 | 0.0 |
-
-### 六、参数编辑与保存
-
-- 在侧边栏编辑材料、几何、载荷、弹簧圈、点胶、芯丝、海波管、传递系数。
-- 点击**“保存当前版本”**将当前参数存入列表。
-- 可保存多个版本，在主区域勾选对比。
-
-### 七、生成对比曲线
-
-勾选已保存版本后点击**“生成对比曲线”**，可得到：
-
-- 弯曲刚度 EI、扭转刚度 GJ、轴向刚度 EA
-- 海波管连接筋弯曲正应力、扭转剪切应力、Von Mises 等效应力
-- 弯曲挠度、扭转角
-
-### 八、生成参数改进建议
-
-点击**“生成参数改进建议”**后，程序依次显示：
-
-1. **改进建议**：海波管分段突变、芯丝直径线性过渡的量化建议。
-2. **原版 vs 平滑改进**：海波管分段用 Hermite 过渡、芯丝直径用 S 形过渡。
-3. **自动推荐点胶位置**：在 70–110 mm 区间以 0.5 mm 步长扫描，评分指标为该区间的最大斜率。Version 1 强制覆盖 89–91 mm。
-4. **原版 vs 推荐版**：显示推荐点胶位置对扭转刚度、扭转角和力传递的影响。
-
-### 九、最小弯曲半径
-
-导丝的最小弯曲半径 \(R_{\min}\) 与弯曲刚度和许用应变相关：
-
-\[
-R_{\min} = \frac{EI_{\text{total}}}{M_{\max}} \quad \text{或} \quad R_{\min} = \frac{r_{\text{outer}}}{\varepsilon_{\text{allow}}}
-\]
-
-**点胶长度增加 → 高刚度段变长 → 整体弯曲刚度提高 → 相同弯矩下曲率变小 → 最小弯曲半径增大。**
-
-如果希望最小弯曲半径不要增大太多，可以：
-- 缩短点胶长度；
-- 在点胶区局部减小海波管连接筋宽度；
-- 使用低模量胶水；
-- 把点胶区放在弯矩较小的位置（如近端）。
+- 目标刚度必须大于芯丝单独刚度；
+- 折减系数 k 必须在 (0, 1)；
+- 反解出的 b 必须在合理范围 (0, 0.5184)；
+- 若违反约束，程序给出警告并标记无解位置（NaN）。
     """)
 
-# ==================== 已保存版本 ====================
 st.header("已保存版本")
 if not st.session_state.saved_versions:
     st.info("请在左侧编辑参数并点击“保存当前版本”。")
@@ -646,7 +584,8 @@ else:
 
         if col2.button("加载到左侧", key=f"load_{idx}"):
             st.session_state.name_input = ver['name']
-            st.session_state.core_editor = ver['core_df'].copy()
+            st.session_state.core_editor_data = ver['core_df'].copy()
+            st.session_state.core_editor_version += 1
             st.session_state.hypo_text_input = "\n".join([f"{seg[0]},{seg[1]},{seg[2]},{seg[3]}" for seg in ver['hypo_segments']])
             st.session_state.spring_start_input = ver['spring_start']
             st.session_state.spring_end_input = ver['spring_end']
@@ -846,3 +785,339 @@ else:
                 st.pyplot(fig_ft)
 
                 st.divider()
+
+# ==================== 反问题求解 ====================
+st.divider()
+st.header("🔧 反问题求解：从目标刚度反推几何参数")
+
+with st.expander("📖 反问题求解说明（点击展开）", expanded=False):
+    st.markdown(r"""
+### 一、反解公式（方案 A：$Z$ 为轴向周期）
+
+正问题中，海波管开槽段的等效折减系数：
+
+$$
+k = \frac{1}{1 + \dfrac{w_s}{Z}\cdot\dfrac{Y}{b}},\qquad Y = 0.5184 - b
+$$
+
+其中：
+- $Z$：轴向周期（相邻切槽中心距）
+- $w_s$：固定槽宽
+- $b$：周向连接筋宽度
+- $0.5184 = \pi D_o / 2$：外表面半周长
+
+由目标刚度 $S_{\text{target}}$（$S \in \{EI, GJ, EA\}$）反推：
+
+$$
+k_S(x) = \frac{S_{\text{target}}(x) - S_{\text{core}}(x)}{\eta_S(x)\cdot S_0}
+$$
+
+再由 $k$ 反解 $b$：
+
+$$
+b = \frac{0.5184\,k\,w_s}{k\,w_s + (1-k)\,Z}
+$$
+
+### 二、物理约束
+
+| 约束 | 说明 |
+|------|------|
+| 目标刚度 > 芯丝刚度 | 否则该位置无解 |
+| $0 < k < 1$ | 折减系数必须在合理范围 |
+| $0 < b < 0.5184$ | 连接筋宽必须在半周长内 |
+| $Z > w_s$ | 轴向周期必须大于槽宽 |
+    """)
+
+col_inv1, col_inv2 = st.columns(2)
+
+with col_inv1:
+    inv_EI_expr = st.text_area(
+        "目标弯曲刚度 EI_target(x)，单位 N·mm²（必填）",
+        value="5 + 0.05*x",
+        height=90, key="inv_EI_expr"
+    )
+    inv_GJ_expr = st.text_area(
+        "目标扭转刚度 GJ_target(x)，单位 N·mm²（可选，留空跳过）",
+        value="", height=90, key="inv_GJ_expr"
+    )
+    inv_EA_expr = st.text_area(
+        "目标轴向刚度 EA_target(x)，单位 N（可选，留空跳过）",
+        value="", height=90, key="inv_EA_expr"
+    )
+    inv_d_expr = st.text_area(
+        "芯丝直径 d(x)，单位 mm（必填）",
+        value="0.05 + 0.0003*x",
+        height=90, key="inv_d_expr"
+    )
+
+with col_inv2:
+    inv_Z = st.number_input("轴向周期 Z（相邻切槽中心距，mm）", value=0.133, step=0.001, format="%.4f", key="inv_Z")
+    inv_w_s = st.number_input("槽宽 w_s（固定值，mm）", value=0.03, step=0.001, format="%.4f", key="inv_w_s")
+    inv_eta_b = st.number_input("弯曲传递系数 η_b", value=0.9, step=0.05, key="inv_eta_b")
+    inv_eta_t = st.number_input("扭转传递系数 η_t", value=0.9, step=0.05, key="inv_eta_t")
+    inv_eta_a = st.number_input("轴向传递系数 η_a", value=1.0, step=0.05, key="inv_eta_a")
+    inv_smooth_window = st.number_input("移动平均窗口（采样点数，偶数自动+1）",
+                                        min_value=1, max_value=101, value=11, step=1, key="inv_smooth_window")
+    inv_primary = st.radio("反解主导刚度", ["EI", "GJ", "EA"], horizontal=True, key="inv_primary")
+
+if st.button("求解反问题", key="inverse_solve_btn", type="primary"):
+    try:
+        inv_E_core = st.session_state.get('E_core_input', 200000.0)
+        inv_G_core = st.session_state.get('G_core_input', 77000.0)
+        inv_E_hypo = st.session_state.get('E_hypo_input', 50000.0)
+        inv_G_hypo = st.session_state.get('G_hypo_input', 19231.0)
+        inv_D_o = st.session_state.get('D_o_input', 0.33)
+        inv_D_i = st.session_state.get('D_i_input', 0.23)
+        inv_L_total = float(st.session_state.get('L_total_input', 350.0))
+
+        if inv_Z <= inv_w_s:
+            st.error(f"轴向周期 Z = {inv_Z} mm 必须大于槽宽 w_s = {inv_w_s} mm，否则实体段长度为负。")
+            st.stop()
+
+        x_inv = np.linspace(0, inv_L_total, 500)
+
+        d_core_inv = safe_eval_array(inv_d_expr, x_inv)
+        if np.any(d_core_inv <= 0):
+            st.warning("芯丝直径 d(x) 存在 ≤ 0 的位置，已钳制到 1e-6 mm。")
+            d_core_inv = np.maximum(d_core_inv, 1e-6)
+
+        EI_core = inv_E_core * np.pi * d_core_inv**4 / 64.0
+        GJ_core = inv_G_core * np.pi * d_core_inv**4 / 32.0
+        EA_core = inv_E_core * np.pi * d_core_inv**2 / 4.0
+
+        I_0 = np.pi / 64.0 * (inv_D_o**4 - inv_D_i**4)
+        J_0 = 2.0 * I_0
+        A_0 = np.pi / 4.0 * (inv_D_o**2 - inv_D_i**2)
+        EI_0 = inv_E_hypo * I_0
+        GJ_0 = inv_G_hypo * J_0
+        EA_0 = inv_E_hypo * A_0
+
+        EI_target = safe_eval_array(inv_EI_expr, x_inv) if inv_EI_expr.strip() else None
+        GJ_target = safe_eval_array(inv_GJ_expr, x_inv) if inv_GJ_expr.strip() else None
+        EA_target = safe_eval_array(inv_EA_expr, x_inv) if inv_EA_expr.strip() else None
+
+        if EI_target is None and GJ_target is None and EA_target is None:
+            st.error("至少需要提供一个目标刚度表达式。")
+            st.stop()
+
+        def k_from_EI(EI_t): return (EI_t - EI_core) / (inv_eta_b * EI_0)
+        def k_from_GJ(GJ_t): return (GJ_t - GJ_core) / (inv_eta_t * GJ_0)
+        def k_from_EA(EA_t): return (EA_t - EA_core) / (inv_eta_a * EA_0)
+
+        k_EI = k_from_EI(EI_target) if EI_target is not None else None
+        k_GJ = k_from_GJ(GJ_target) if GJ_target is not None else None
+        k_EA = k_from_EA(EA_target) if EA_target is not None else None
+
+        k_map = {'EI': k_EI, 'GJ': k_GJ, 'EA': k_EA}
+        k_used = k_map[inv_primary]
+        if k_used is None:
+            st.error(f"主导刚度 {inv_primary} 的目标表达式未填写。")
+            st.stop()
+
+        valid_mask = np.isfinite(k_used) & (k_used > 1e-6) & (k_used < 1.0)
+
+        n_total = len(x_inv)
+        n_invalid_k = int(np.sum(~valid_mask))
+        if n_invalid_k > 0:
+            st.warning(f"有 {n_invalid_k}/{n_total} 个位置的折减系数 k 超出 (0,1)，这些位置将标记为无解（NaN）。")
+
+        if EI_target is not None:
+            mask_bad_EI = EI_target <= EI_core
+            if np.any(mask_bad_EI):
+                st.warning(f"EI 目标在 {int(np.sum(mask_bad_EI))} 个位置 ≤ 芯丝单独刚度，无法反解。")
+        if GJ_target is not None:
+            mask_bad_GJ = GJ_target <= GJ_core
+            if np.any(mask_bad_GJ):
+                st.warning(f"GJ 目标在 {int(np.sum(mask_bad_GJ))} 个位置 ≤ 芯丝单独刚度，无法反解。")
+        if EA_target is not None:
+            mask_bad_EA = EA_target <= EA_core
+            if np.any(mask_bad_EA):
+                st.warning(f"EA 目标在 {int(np.sum(mask_bad_EA))} 个位置 ≤ 芯丝单独刚度，无法反解。")
+
+        # --- 方案 A 反解 b ---
+        with np.errstate(divide='ignore', invalid='ignore'):
+            b_inv = (0.5184 * k_used * inv_w_s) / (k_used * inv_w_s + (1.0 - k_used) * inv_Z)
+        b_inv = np.where(valid_mask, b_inv, np.nan)
+
+        b_smooth = moving_average(b_inv, int(inv_smooth_window))
+
+        # --- 由平滑后的 b 反推 k ---
+        with np.errstate(divide='ignore', invalid='ignore'):
+            Y_s = 0.5184 - b_smooth
+            k_smooth = 1.0 / (1.0 + (inv_w_s / inv_Z) * (Y_s / b_smooth))
+        k_smooth = np.where(
+            np.isfinite(k_smooth) & (b_smooth > 0) & (b_smooth < 0.5184),
+            np.clip(k_smooth, 0.0, 1.0),
+            np.nan
+        )
+
+        EI_hypo_actual = k_smooth * EI_0
+        GJ_hypo_actual = k_smooth * GJ_0
+        EA_hypo_actual = k_smooth * EA_0
+
+        EI_actual = EI_core + inv_eta_b * EI_hypo_actual
+        GJ_actual = GJ_core + inv_eta_t * GJ_hypo_actual
+        EA_actual = EA_core + inv_eta_a * EA_hypo_actual
+
+        k_available = [k for k in [k_EI, k_GJ, k_EA] if k is not None]
+        if len(k_available) >= 2:
+            k_stack = np.vstack(k_available)
+            with np.errstate(invalid='ignore'):
+                k_spread = np.nanmax(k_stack, axis=0) - np.nanmin(k_stack, axis=0)
+            spread_max = np.nanmax(k_spread) if np.any(np.isfinite(k_spread)) else 0.0
+            if spread_max > 0.15:
+                st.warning(
+                    f"⚠️ 不同目标推导出的 k(x) 最大差异为 {spread_max:.3f}。"
+                    "这说明给定的 EI/GJ/EA 目标在物理上无法同时由同一个 b(x) 实现。"
+                    "以主导刚度为准，其他目标只能作为近似。"
+                )
+            else:
+                st.success(f"✅ 不同目标推导出的 k(x) 最大差异仅 {spread_max:.3f}，一致性良好。")
+
+        def rel_err(actual, target):
+            if target is None:
+                return None
+            with np.errstate(divide='ignore', invalid='ignore'):
+                e = np.abs(actual - target) / np.maximum(np.abs(target), 1e-9) * 100.0
+            return e
+
+        err_EI = rel_err(EI_actual, EI_target)
+        err_GJ = rel_err(GJ_actual, GJ_target)
+        err_EA = rel_err(EA_actual, EA_target)
+
+        def safe_metric(e):
+            if e is None:
+                return "—"
+            v = np.nanmax(e) if np.any(np.isfinite(e)) else float('nan')
+            return f"{v:.2f}%" if np.isfinite(v) else "—"
+
+        st.subheader("误差统计（主导刚度 = " + inv_primary + "）")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("EI 最大相对误差", safe_metric(err_EI))
+        c2.metric("GJ 最大相对误差", safe_metric(err_GJ))
+        c3.metric("EA 最大相对误差", safe_metric(err_EA))
+
+        fig_inv, axes_inv = plt.subplots(6, 1, figsize=(11, 22))
+        fig_inv.suptitle("Inverse Problem: Target vs Actual", fontsize=14)
+
+        axes_inv[0].plot(x_inv, EI_core, 'g:', linewidth=1.5, label='Core EI alone')
+        if EI_target is not None:
+            axes_inv[0].plot(x_inv, EI_target, 'b-', linewidth=2, label='Target EI')
+        axes_inv[0].plot(x_inv, EI_actual, 'r--', linewidth=2, label='Actual EI (smoothed b)')
+        axes_inv[0].set_ylabel('EI (N·mm²)')
+        axes_inv[0].grid(True); axes_inv[0].legend()
+        axes_inv[0].set_title('Bending Stiffness EI')
+
+        axes_inv[1].plot(x_inv, GJ_core, 'g:', linewidth=1.5, label='Core GJ alone')
+        if GJ_target is not None:
+            axes_inv[1].plot(x_inv, GJ_target, 'b-', linewidth=2, label='Target GJ')
+        axes_inv[1].plot(x_inv, GJ_actual, 'r--', linewidth=2, label='Actual GJ (smoothed b)')
+        axes_inv[1].set_ylabel('GJ (N·mm²)')
+        axes_inv[1].grid(True); axes_inv[1].legend()
+        axes_inv[1].set_title('Torsional Stiffness GJ')
+
+        axes_inv[2].plot(x_inv, EA_core, 'g:', linewidth=1.5, label='Core EA alone')
+        if EA_target is not None:
+            axes_inv[2].plot(x_inv, EA_target, 'b-', linewidth=2, label='Target EA')
+        axes_inv[2].plot(x_inv, EA_actual, 'r--', linewidth=2, label='Actual EA (smoothed b)')
+        axes_inv[2].set_ylabel('EA (N)')
+        axes_inv[2].grid(True); axes_inv[2].legend()
+        axes_inv[2].set_title('Axial Stiffness EA')
+
+        axes_inv[3].plot(x_inv, b_inv, color='lightgray', linewidth=1, label='Raw b (NaN = infeasible)')
+        axes_inv[3].plot(x_inv, b_smooth, 'b-', linewidth=2, label='Smoothed b')
+        axes_inv[3].axhline(0.5184, color='red', linestyle=':', alpha=0.5, label='b_max = 0.5184 mm')
+        axes_inv[3].axhline(0.0, color='red', linestyle=':', alpha=0.5)
+        axes_inv[3].set_ylabel('b (mm)')
+        axes_inv[3].grid(True); axes_inv[3].legend()
+        axes_inv[3].set_title('Connector Width b(x)')
+
+        if k_EI is not None: axes_inv[4].plot(x_inv, k_EI, color='cyan', linewidth=1.5, label='k from EI')
+        if k_GJ is not None: axes_inv[4].plot(x_inv, k_GJ, color='magenta', linewidth=1.5, label='k from GJ')
+        if k_EA is not None: axes_inv[4].plot(x_inv, k_EA, color='orange', linewidth=1.5, label='k from EA')
+        axes_inv[4].plot(x_inv, k_smooth, 'r-', linewidth=2, label='k used (smoothed b)')
+        axes_inv[4].axhline(0, color='black', linestyle=':', alpha=0.4)
+        axes_inv[4].axhline(1, color='black', linestyle=':', alpha=0.4)
+        axes_inv[4].set_ylabel('Reduction factor k')
+        axes_inv[4].grid(True); axes_inv[4].legend()
+        axes_inv[4].set_title('Reduction Factor k(x)')
+
+        axes_inv[5].plot(x_inv, d_core_inv, 'g-', linewidth=2, label='Core diameter d(x)')
+        axes_inv[5].set_xlabel('Distance from distal end (mm)')
+        axes_inv[5].set_ylabel('d (mm)')
+        axes_inv[5].grid(True); axes_inv[5].legend()
+        axes_inv[5].set_title('Core Diameter d(x)')
+
+        fig_inv.tight_layout(rect=[0, 0, 1, 0.98])
+        st.pyplot(fig_inv)
+
+        st.subheader("反问题求解结果（每 10 mm 采样）")
+        result_dict = {
+            '位置 (mm)': np.round(x_inv, 2),
+            '芯丝直径 d (mm)': np.round(d_core_inv, 4),
+            '连接筋宽 b (mm)': np.round(b_smooth, 4),
+            '折减系数 k': np.round(k_smooth, 4),
+        }
+        if EI_target is not None:
+            result_dict['目标 EI'] = np.round(EI_target, 3)
+            result_dict['实际 EI'] = np.round(EI_actual, 3)
+        if GJ_target is not None:
+            result_dict['目标 GJ'] = np.round(GJ_target, 3)
+            result_dict['实际 GJ'] = np.round(GJ_actual, 3)
+        if EA_target is not None:
+            result_dict['目标 EA'] = np.round(EA_target, 3)
+            result_dict['实际 EA'] = np.round(EA_actual, 3)
+
+        inv_result_df = pd.DataFrame(result_dict)
+        step = max(1, len(inv_result_df) // 35)
+        st.dataframe(inv_result_df.iloc[::step], use_container_width=True)
+
+        st.subheader("可行性检查报告")
+        check_items = []
+
+        b_finite = np.isfinite(b_smooth)
+        if not np.any(b_finite):
+            check_items.append("❌ 全部位置无解（b 全为 NaN）")
+        else:
+            if np.any(b_finite & (b_smooth <= 0)):
+                check_items.append("❌ 存在 b ≤ 0 的位置，无物理意义")
+            else:
+                check_items.append("✅ 所有有效位置 b > 0")
+
+            if np.any(b_finite & (b_smooth >= 0.5184)):
+                check_items.append("❌ 存在 b ≥ 0.5184 的位置，超过半周长")
+            else:
+                check_items.append("✅ 所有有效位置 b < 0.5184")
+
+        k_finite = np.isfinite(k_smooth)
+        if np.any(k_finite):
+            if np.any((k_smooth <= 0) | (k_smooth >= 1)):
+                check_items.append("❌ 存在 k 超出 (0,1) 的位置")
+            else:
+                check_items.append("✅ 所有有效位置 k 在 (0,1) 范围")
+        else:
+            check_items.append("❌ 全部位置 k 无解")
+
+        n_nan_b = int(np.sum(~b_finite))
+        if n_nan_b > 0:
+            check_items.append(f"⚠️ {n_nan_b}/{len(b_smooth)} 个位置无解（已标记 NaN）")
+
+        for tag, e in [("EI", err_EI), ("GJ", err_GJ), ("EA", err_EA)]:
+            if e is None:
+                continue
+            e_finite = e[np.isfinite(e)]
+            if len(e_finite) == 0:
+                check_items.append(f"⚠️ {tag} 误差无法计算（全部无解）")
+            else:
+                emax = e_finite.max()
+                if emax > 20:
+                    check_items.append(f"⚠️ {tag} 最大相对误差 {emax:.2f}% 较大，建议增大移动平均窗口或调整目标函数")
+                else:
+                    check_items.append(f"✅ {tag} 最大相对误差 {emax:.2f}% 在可接受范围")
+
+        for item in check_items:
+            st.write(item)
+
+    except Exception as e:
+        st.error(f"反问题求解出错：{e}")
+        st.exception(e)
