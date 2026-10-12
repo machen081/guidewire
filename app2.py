@@ -158,13 +158,14 @@ def build_eta_arrays(x_arr, glue_intervals, spring_start, spring_end, pitch,
     n = len(x_arr)
     eta_b_x = np.zeros(n); eta_t_x = np.zeros(n); eta_a_x = np.zeros(n)
     for i, xi in enumerate(x_arr):
-        eta_b = eta_global['no_spring_b']
+        # η_b：默认按弹簧圈范围判断
+        if spring_start <= xi < spring_end:
+            eta_b = eta_global['spring_b']
+        else:
+            eta_b = eta_global['no_spring_b']
         eta_t = eta_global['no_spring_t']
         eta_a = eta_global['no_spring_a']
-
-        in_spring = spring_start <= xi < spring_end
-        if in_spring:
-            eta_b = eta_global['spring_b']
+        if spring_start <= xi < spring_end:
             eta_t = eta_global['spring_t']
             eta_a = eta_global['spring_a']
 
@@ -180,7 +181,7 @@ def build_eta_arrays(x_arr, glue_intervals, spring_start, spring_end, pitch,
                     eta_b = eta_global['core_hypo_b']; eta_t = eta_global['core_hypo_t']; eta_a = eta_global['core_hypo_a']
                 break
 
-        if use_pitch_corr and in_spring and not in_glue and pitch > 0:
+        if use_pitch_corr and spring_start <= xi < spring_end and not in_glue and pitch > 0:
             eta_t = min(eta_t * P_REF / pitch, 0.95)
 
         eta_b_x[i] = eta_b; eta_t_x[i] = eta_t; eta_a_x[i] = eta_a
@@ -215,25 +216,21 @@ def compute_version(x, core_df, hypo_segments, params, eta_global,
             b_val, Z_val, N_val = calc_b_Z_original(xi, hypo_segments, default_N=n_beam_default)
         b_arr[i] = b_val; Z_arr[i] = Z_val; N_arr[i] = N_val
 
-        if 0 <= xi <= 1:
-            eta_b = 1.0
-        elif 90 <= xi <= 100:
-            eta_b = 0.9
-        elif 345 <= xi <= 346:
-            eta_b = 1.0
+        # ===== 修改点：η_b 不再硬编码，完全由弹簧圈范围 + 点胶区间决定 =====
+        if spring_start <= xi < spring_end:
+            eta_b = eta_global['spring_b']
+            eta_a = eta_global['spring_a']
         else:
-            if 0 <= xi <= 150:
-                eta_b = 0.9
-            else:
-                eta_b = 0.85
+            eta_b = eta_global['no_spring_b']
+            eta_a = eta_global['no_spring_a']
 
-        eta_a = eta_global['no_spring_a']
         for g_start, g_end, g_type in glue_intervals:
             if g_start <= xi < g_end:
                 if g_type == 'full': eta_b = eta_global['full_b']; eta_a = eta_global['full_a']
                 elif g_type == 'core_spring': eta_b = eta_global['core_spring_b']; eta_a = eta_global['core_spring_a']
                 elif g_type == 'core_hypo': eta_b = eta_global['core_hypo_b']; eta_a = eta_global['core_hypo_a']
                 break
+        # ===== 修改点结束 =====
 
         if spring_enabled and complex_params:
             eta_t = eta_t_constant(xi, glue_intervals,
@@ -288,7 +285,9 @@ def compute_version(x, core_df, hypo_segments, params, eta_global,
     phi = cumulative_trapezoid(T_total/GJ_total, x, initial=0)
 
     return (EI_total, GJ_total, EA_total, sigma_bend, tau_tors, sigma_eq, y_def, phi,
-            T_hypo, T_core, ratio_t, eta_t_arr)
+            T_hypo, T_core, ratio_t, eta_t_arr,
+            EI_core, EI_hypo, GJ_core, GJ_hypo, EA_core, EA_hypo,
+            k, ratio_b, eta_b_arr, eta_a_arr, M_total, M_hypo, T_total, theta)
 
 def three_point_deflection_at(z, EI_local, P, L, a):
     M = np.where(z <= L/2, P*z/2, P*(L-z)/2)
@@ -368,7 +367,7 @@ if 'n_beam_mode' not in st.session_state: st.session_state.n_beam_mode = "双梁
 for k in eta_keys:
     if k + '_input' not in st.session_state: st.session_state[k + '_input'] = eta_defaults[k]
 
-# ==================== JSON 导入导出 ====================
+# ==================== JSON 导入导出辅助函数 ====================
 MODEL_FILE_VERSION = 1
 APP_ID = "guidewire_stiffness_analysis"
 N_BEAM_CHOICES = ["单梁（全周长 1 个连接筋）",
@@ -799,7 +798,6 @@ with st.sidebar:
         st.session_state.saved_versions.append(version)
         st.success(f"版本 '{version['name']}' 已保存")
 
-    # ==================== 模型导入 / 导出 ====================
     st.divider()
     st.header("📦 模型导入 / 导出")
     st.caption("导出当前工作区 + 所有已保存版本，导入后完整恢复。")
@@ -854,7 +852,6 @@ with st.sidebar:
                     elif mode.startswith("②"): version_action = "merge"
 
                 if st.button("✅ 确认导入", key="confirm_import_model", type="primary"):
-                    # 清空所有 widget 键（强制刷新）
                     clear_keys = [
                         'name_input',
                         'E_core_input','G_core_input','E_hypo_input','G_hypo_input',
@@ -865,7 +862,6 @@ with st.sidebar:
                         'glue_input','hypo_text_input','n_beam_mode',
                     ] + [k + '_input' for k in eta_keys]
 
-                    # 确定最终 saved_versions
                     if version_action == "replace":
                         final_versions = new_versions
                     elif version_action == "merge":
@@ -883,7 +879,6 @@ with st.sidebar:
                     else:
                         final_versions = st.session_state.saved_versions
 
-                    # 构造 pending
                     set_keys = {}
                     for k, v in new_cur.items():
                         if k == 'core_df':
@@ -943,14 +938,37 @@ else:
             st.warning("请至少选择一个版本")
         else:
             x = np.linspace(0, st.session_state.L_total_input, 500)
+
             fig1, axes1 = plt.subplots(3,1,figsize=(10,12)); fig1.suptitle("Stiffness Comparison")
             axes1[0].set_ylabel('EI (N·mm²)'); axes1[1].set_ylabel('GJ (N·mm²)')
             axes1[2].set_xlabel('Distance (mm)'); axes1[2].set_ylabel('EA (N)')
             for ax in axes1: ax.grid(True)
+
             fig2, axes2 = plt.subplots(3,1,figsize=(10,12)); fig2.suptitle("Stress Comparison")
             axes2[0].set_ylabel('sigma_b (MPa)'); axes2[1].set_ylabel('tau (MPa)')
             axes2[2].set_xlabel('Distance (mm)'); axes2[2].set_ylabel('Von Mises (MPa)')
             for ax in axes2: ax.grid(True)
+
+            fig3, axes3 = plt.subplots(2,1,figsize=(10,8)); fig3.suptitle("Deformation Comparison")
+            axes3[0].set_ylabel('Deflection (mm)'); axes3[1].set_ylabel('Twist angle (rad)')
+            axes3[1].set_xlabel('Distance from distal end (mm)')
+            for ax in axes3: ax.grid(True)
+
+            fig4, axes4 = plt.subplots(3,1,figsize=(10,12)); fig4.suptitle("Contribution Decomposition")
+            axes4[0].set_ylabel('EI (N·mm²)'); axes4[1].set_ylabel('GJ (N·mm²)')
+            axes4[2].set_xlabel('Distance (mm)'); axes4[2].set_ylabel('EA (N)')
+            for ax in axes4: ax.grid(True)
+
+            fig5, axes5 = plt.subplots(3,1,figsize=(10,12)); fig5.suptitle("Reduction & Transfer")
+            axes5[0].set_ylabel('k (reduction factor)'); axes5[0].set_ylim(-0.05, 1.05)
+            axes5[1].set_ylabel('ratio_b = EI_hypo / EI_total'); axes5[1].set_ylim(-0.05, 1.05)
+            axes5[2].set_xlabel('Distance (mm)'); axes5[2].set_ylabel('eta_b, eta_a')
+            for ax in axes5: ax.grid(True)
+
+            fig6, axes6 = plt.subplots(2,1,figsize=(10,8)); fig6.suptitle("Torque Distribution")
+            axes6[0].set_ylabel('T_hypo / T_total')
+            axes6[1].set_ylabel('T (N·mm)'); axes6[1].set_xlabel('Distance (mm)')
+            for ax in axes6: ax.grid(True)
 
             for idx in selected_indices:
                 ver = st.session_state.saved_versions[idx]
@@ -959,14 +977,39 @@ else:
                 params = {k: ver[k] for k in ['E_core','G_core','E_hypo','G_hypo','D_o','D_i','w_s','L_total','F','T0','spring_start','spring_end','glue_intervals']}
                 params['n_beam'] = ver.get('n_beam', 2)
                 res = compute_version(x, ver['core_df'], ver['hypo_segments'], params, ver['eta'])
+
                 axes1[0].plot(x, res[0], color=color, linewidth=2, label=label)
                 axes1[1].plot(x, res[1], color=color, linewidth=2, label=label)
                 axes1[2].plot(x, res[2], color=color, linewidth=2, label=label)
+
                 axes2[0].plot(x, res[3], color=color, linewidth=2, label=label)
                 axes2[1].plot(x, res[4], color=color, linewidth=2, label=label)
                 axes2[2].plot(x, res[5], color=color, linewidth=2, label=label)
-            for ax in list(axes1) + list(axes2): ax.legend()
-            st.pyplot(fig1); st.pyplot(fig2)
+
+                axes3[0].plot(x, res[6], color=color, linewidth=2, label=label)
+                axes3[1].plot(x, res[7], color=color, linewidth=2, label=label)
+
+                axes4[0].plot(x, res[12], color=color, linewidth=1.5, linestyle=':', label=f"{label} core EI")
+                axes4[0].plot(x, res[13], color=color, linewidth=2.5, linestyle='-', label=f"{label} hypo EI")
+                axes4[1].plot(x, res[14], color=color, linewidth=1.5, linestyle=':', label=f"{label} core GJ")
+                axes4[1].plot(x, res[15], color=color, linewidth=2.5, linestyle='-', label=f"{label} hypo GJ")
+                axes4[2].plot(x, res[16], color=color, linewidth=1.5, linestyle=':', label=f"{label} core EA")
+                axes4[2].plot(x, res[17], color=color, linewidth=2.5, linestyle='-', label=f"{label} hypo EA")
+
+                axes5[0].plot(x, res[18], color=color, linewidth=2, label=label)
+                axes5[1].plot(x, res[19], color=color, linewidth=2, label=label)
+                axes5[2].plot(x, res[20], color=color, linewidth=2, linestyle='-', label=f"{label} eta_b")
+                axes5[2].plot(x, res[21], color=color, linewidth=1.5, linestyle='--', label=f"{label} eta_a")
+
+                axes6[0].plot(x, res[10], color=color, linewidth=2, label=label)
+                axes6[1].plot(x, res[8], color=color, linewidth=2, linestyle='-', label=f"{label} T_hypo")
+                axes6[1].plot(x, res[9], color=color, linewidth=1.5, linestyle='--', label=f"{label} T_core")
+
+            for ax in list(axes1)+list(axes2)+list(axes3)+list(axes4)+list(axes5)+list(axes6):
+                ax.legend(fontsize=8)
+
+            st.pyplot(fig1); st.pyplot(fig2); st.pyplot(fig3)
+            st.pyplot(fig4); st.pyplot(fig5); st.pyplot(fig6)
 
 # ==================== 反问题 ====================
 st.divider()
